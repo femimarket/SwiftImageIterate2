@@ -32,6 +32,9 @@ private enum Theme {
 struct Variation: Identifiable, Equatable {
     let id = UUID()
     let image: UIImage
+    /// Server-side filename (under femi.market/_upload). Lets us iterate from
+    /// this variation by reusing it as the next `image` field without re-uploading.
+    let filename: String
 
     static func == (lhs: Variation, rhs: Variation) -> Bool { lhs.id == rhs.id }
 }
@@ -40,6 +43,14 @@ struct Variation: Identifiable, Equatable {
 
 struct ContentView: View {
     @State private var hero: UIImage = ContentView.makeDemoImage()
+    /// Server-side filename of the current hero. Seeded with the bundled demo
+    /// asset (which also exists on femi.market under the same name) so the first
+    /// generate can reference it directly. Replaced by each variation's `file`
+    /// as the user iterates.
+    @State private var heroFile: String? = ContentView.demoFilename
+    /// Dominant warm tone of the current hero image, used to color the ambient
+    /// glow and the hero drop shadow so the chrome always matches the photo.
+    @State private var heroTint: Color = ContentView.dominantColor(of: ContentView.makeDemoImage())
     @State private var history: [UIImage] = []
     @State private var variations: [Variation] = []
     @State private var selectedVibes: Set<String> = []
@@ -99,18 +110,20 @@ struct ContentView: View {
     private var ambientBackground: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
+            // Tinted by the hero's dominant color so chrome and content harmonize.
             RadialGradient(
-                colors: [Color(red: 0.42, green: 0.10, blue: 0.55).opacity(0.40), .clear],
+                colors: [heroTint.opacity(0.45), .clear],
                 center: .init(x: 0.18, y: 0.02),
                 startRadius: 0, endRadius: 380
             )
             .ignoresSafeArea()
             RadialGradient(
-                colors: [Color(red: 0.95, green: 0.30, blue: 0.55).opacity(0.25), .clear],
+                colors: [heroTint.opacity(0.30), .clear],
                 center: .init(x: 0.92, y: 0.06),
                 startRadius: 0, endRadius: 320
             )
             .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.6), value: heroTint)
         }
     }
 
@@ -147,12 +160,19 @@ struct ContentView: View {
     // MARK: Hero
 
     private var heroCard: some View {
-        Image(uiImage: hero)
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(maxWidth: .infinity)
+        // Size driver is a clear square that's capped at 60% of screen height,
+        // so the bottom bar (vibe pills + prompt + Generate) always has room and
+        // the hero never pushes them off-screen on shorter devices.
+        Color.clear
             .aspectRatio(1, contentMode: .fit)
-            .clipped()
+            .frame(maxHeight: UIScreen.main.bounds.height * 0.60)
+            .frame(maxWidth: .infinity)
+            .overlay {
+                Image(uiImage: hero)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFill()
+            }
             .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 32, style: .continuous)
@@ -179,7 +199,7 @@ struct ContentView: View {
             .overlay {
                 if isGenerating { ShimmerView().clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous)).allowsHitTesting(false) }
             }
-            .shadow(color: Color(red: 0.95, green: 0.30, blue: 0.65).opacity(0.28), radius: 44, y: 22)
+            .shadow(color: heroTint.opacity(0.45), radius: 44, y: 22)
             .shadow(color: .black.opacity(0.55), radius: 18, y: 10)
             .scaleEffect(heroBreath ? 1.006 : 1.0)
             .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: heroBreath)
@@ -241,6 +261,7 @@ struct ContentView: View {
         Button { promote(v) } label: {
             Image(uiImage: v.image)
                 .resizable()
+                .interpolation(.high)
                 .aspectRatio(contentMode: .fill)
                 .frame(width: 168, height: 168)
                 .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -406,9 +427,12 @@ struct ContentView: View {
 
     private func promote(_ v: Variation) {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let newTint = ContentView.dominantColor(of: v.image)
         withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) {
             history.append(hero)
             hero = v.image
+            heroFile = v.filename
+            heroTint = newTint
             variations.removeAll { $0.id == v.id }
         }
     }
@@ -417,9 +441,14 @@ struct ContentView: View {
         guard idx < history.count else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let restored = history[idx]
+        let newTint = ContentView.dominantColor(of: restored)
         withAnimation(.spring(response: 0.45, dampingFraction: 0.78)) {
             history.append(hero)
             hero = restored
+            // Restoring a prior hero — we don't track filenames per history slot,
+            // so fall back to the server default for the next generation.
+            heroFile = nil
+            heroTint = newTint
             history.remove(at: idx)
         }
     }
@@ -438,17 +467,17 @@ struct ContentView: View {
         }
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
 
-        let baseImage = hero
+        let imageRef = heroFile ?? ""
 
         do {
-            let images = try await ImageService.shared.generate(
+            let results = try await ImageService.shared.generate(
                 prompt: finalPrompt,
-                baseImage: baseImage,
+                imageFilename: imageRef,
                 count: 2
             )
             withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) {
-                for img in images {
-                    variations.insert(Variation(image: img), at: 0)
+                for r in results {
+                    variations.insert(Variation(image: r.image, filename: r.filename), at: 0)
                 }
                 pendingPlaceholders = 0
             }
@@ -471,11 +500,43 @@ struct ContentView: View {
     }
 
     // MARK: Demo image
+    //
+    // The bundled PNG is also a real asset on femi.market under the same name,
+    // so we can pass its filename to `image:` for the very first generation —
+    // no client upload needed.
+
+    static let demoFilename = "demoUploadSong_019e7f3d-aa21-7173-86ae-fbe8d61d0a84.png"
 
     static func makeDemoImage() -> UIImage {
+        if let url = Bundle.main.url(forResource: demoFilename, withExtension: nil),
+           let data = try? Data(contentsOf: url),
+           let img = UIImage(data: data) {
+            return img
+        }
         let renderer = ImageRenderer(content: DemoImageCanvas())
         renderer.scale = 2.0
         return renderer.uiImage ?? UIImage()
+    }
+
+    /// Average color of the image, downsampled to a single pixel.
+    /// Used to tint the ambient glow and hero drop shadow.
+    static func dominantColor(of image: UIImage) -> Color {
+        guard let cg = image.cgImage else { return Color(red: 0.45, green: 0.20, blue: 0.55) }
+        let ctx = CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        guard let ctx else { return Color(red: 0.45, green: 0.20, blue: 0.55) }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let data = ctx.data?.assumingMemoryBound(to: UInt8.self) else {
+            return Color(red: 0.45, green: 0.20, blue: 0.55)
+        }
+        let r = Double(data[0]) / 255.0
+        let g = Double(data[1]) / 255.0
+        let b = Double(data[2]) / 255.0
+        // Pump saturation up a bit so a muted average still reads as a glow.
+        return Color(red: min(1, r * 1.25), green: min(1, g * 1.15), blue: min(1, b * 1.05))
     }
 }
 
@@ -645,42 +706,39 @@ final class ImageService {
         ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(bearer)"
     }
 
-    func generate(prompt: String, baseImage: UIImage, count: Int) async throws -> [UIImage] {
-        log("STEP 1", "encode base image → JPEG")
-        guard let jpeg = baseImage.jpegData(compressionQuality: 0.85) else {
-            log("STEP 1 FAIL", "jpegData returned nil")
-            throw ImageServiceError.encodingFailed
-        }
-        log("STEP 1 OK", "jpeg bytes=\(jpeg.count)")
+    /// Result of a single generation: the decoded image plus its server-side filename
+    /// (so the UI can iterate on it without re-uploading).
+    struct GenerationResult {
+        let image: UIImage
+        let filename: String
+    }
 
-        log("STEP 2", "wrap into data URI (probably wrong — likely needs filename or upload ref)")
-        let dataURI = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
-        log("STEP 2 OK", "dataURI chars=\(dataURI.count)")
-
-        log("STEP 3", "spawn \(count) parallel generations")
-        return try await withThrowingTaskGroup(of: Result<UIImage, Error>.self) { group in
+    /// `imageFilename` is the server-side filename of a previously-known image, or
+    /// `""` to let the server use the default image.
+    func generate(prompt: String, imageFilename: String, count: Int) async throws -> [GenerationResult] {
+        log("STEP 1", "spawn \(count) parallel generations imageRef='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
+        return try await withThrowingTaskGroup(of: Result<GenerationResult, Error>.self) { group in
             for i in 0..<count {
                 group.addTask { [weak self] in
                     guard let self else { return .failure(ImageServiceError.requestFailed("service gone")) }
                     do {
-                        log("STEP 3.\(i)", "begin singleGenerate")
-                        let img = try await self.singleGenerate(prompt: prompt, imageDataURI: dataURI, slot: i)
-                        log("STEP 3.\(i) OK", "image \(Int(img.size.width))x\(Int(img.size.height))")
-                        return .success(img)
+                        let r = try await self.singleGenerate(prompt: prompt, imageFilename: imageFilename, slot: i)
+                        log("STEP 1.\(i) OK", "image \(Int(r.image.size.width))x\(Int(r.image.size.height)) file='\(r.filename)'")
+                        return .success(r)
                     } catch let e as ImageServiceError {
-                        log("STEP 3.\(i) FAIL", e.errorDescription ?? "unknown")
+                        log("STEP 1.\(i) FAIL", e.errorDescription ?? "unknown")
                         return .failure(e)
                     } catch {
-                        log("STEP 3.\(i) FAIL", "\((error as NSError).domain) \((error as NSError).code)")
+                        log("STEP 1.\(i) FAIL", "\((error as NSError).domain) \((error as NSError).code)")
                         return .failure(error)
                     }
                 }
             }
-            var images: [UIImage] = []
+            var results: [GenerationResult] = []
             var firstError: Error?
             for try await result in group {
                 switch result {
-                case .success(let img): images.append(img)
+                case .success(let r): results.append(r)
                 case .failure(let err): if firstError == nil { firstError = err }
                 }
             }
@@ -688,36 +746,36 @@ final class ImageService {
                 guard let e = firstError else { return "none" }
                 return (e as? ImageServiceError)?.errorDescription ?? (e as NSError).localizedDescription
             }()
-            log("STEP 3 DONE", "success=\(images.count)/\(count) firstError=\(errSummary)")
-            if images.isEmpty {
+            log("STEP 1 DONE", "success=\(results.count)/\(count) firstError=\(errSummary)")
+            if results.isEmpty {
                 throw firstError ?? ImageServiceError.requestFailed("no images returned")
             }
-            return images
+            return results
         }
     }
 
-    private func singleGenerate(prompt: String, imageDataURI: String, slot: Int) async throws -> UIImage {
-        log("[slot \(slot)] STEP 4", "POST /api action=Generate")
+    private func singleGenerate(prompt: String, imageFilename: String, slot: Int) async throws -> GenerationResult {
+        log("[slot \(slot)] STEP 2", "POST /api action=Generate image='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
         let initial = try await call(
             action: .generate,
             id: UUID(),
-            image: imageDataURI,
+            image: imageFilename,
             prompt: prompt,
             slot: slot
         )
-        log("[slot \(slot)] STEP 4 OK", "id=\(initial.id) requestId='\(initial.requestId)' status=\(initial.status.rawValue) file='\(initial.file)' image.len=\(initial.image.count)")
+        log("[slot \(slot)] STEP 2 OK", "id=\(initial.id) requestId='\(initial.requestId)' status=\(initial.status.rawValue) file='\(initial.file)'")
 
         var current = initial
         let deadline = Date().addingTimeInterval(120)
         var pollCount = 0
         while current.status == .pending {
             if Date() > deadline {
-                log("[slot \(slot)] STEP 5 TIMEOUT", "polled \(pollCount) times, still pending")
+                log("[slot \(slot)] STEP 3 TIMEOUT", "polled \(pollCount) times")
                 throw ImageServiceError.timedOut
             }
             try await Task.sleep(nanoseconds: 3_000_000_000)
             pollCount += 1
-            log("[slot \(slot)] STEP 5.\(pollCount)", "POST /api action=Poll requestId=\(current.requestId)")
+            log("[slot \(slot)] STEP 3.\(pollCount)", "POST /api action=Poll requestId='\(current.requestId)'")
             current = try await call(
                 action: .poll,
                 id: current.id,
@@ -726,16 +784,17 @@ final class ImageService {
                 prompt: "",
                 slot: slot
             )
-            log("[slot \(slot)] STEP 5.\(pollCount) OK", "status=\(current.status.rawValue) file='\(current.file)' image.len=\(current.image.count)")
+            log("[slot \(slot)] STEP 3.\(pollCount) OK", "status=\(current.status.rawValue) file='\(current.file)'")
         }
 
         guard current.status == .completed else {
-            log("[slot \(slot)] STEP 5 FAIL", "final status=\(current.status.rawValue)")
+            log("[slot \(slot)] STEP 3 FAIL", "final status=\(current.status.rawValue)")
             throw ImageServiceError.taskFailed
         }
 
-        log("[slot \(slot)] STEP 6", "fetch result media file='\(current.file)'")
-        return try await fetchResultImage(reference: current.file, slot: slot)
+        log("[slot \(slot)] STEP 4", "fetch result media file='\(current.file)'")
+        let img = try await fetchResultImage(reference: current.file, slot: slot)
+        return GenerationResult(image: img, filename: current.file)
     }
 
     private func call(
