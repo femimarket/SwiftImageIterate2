@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		14F0D4522FDD6DC100ABD6BB /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 14F0D4512FDD6DC100ABD6BB /* Api */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		14F0D4422FDD6B1400ABD6BB /* ImageIterate2.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ImageIterate2.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				14F0D4522FDD6DC100ABD6BB /* Api in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = ImageIterate2;
 			packageProductDependencies = (
+				14F0D4512FDD6DC100ABD6BB /* Api */,
 			);
 			productName = ImageIterate2;
 			productReference = 14F0D4422FDD6B1400ABD6BB /* ImageIterate2.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 14F0D4392FDD6B1400ABD6BB;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				14F0D4502FDD6DC100ABD6BB /* XCLocalSwiftPackageReference "Generated/Api" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 14F0D4432FDD6B1400ABD6BB /* Products */;
 			projectDirPath = "";
@@ -332,6 +341,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		14F0D4502FDD6DC100ABD6BB /* XCLocalSwiftPackageReference "Generated/Api" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Generated/Api;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		14F0D4512FDD6DC100ABD6BB /* Api */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Api;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 14F0D43A2FDD6B1400ABD6BB /* Project object */;
 }
