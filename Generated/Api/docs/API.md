@@ -4,12 +4,12 @@
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
 **action** | [**ApiAction**](ApiAction.md) |  | 
-**audio** | **String** |  | 
+**audio** | **String** | filename of already uploaded audio else default | 
 **balance** | **Int64** |  | 
 **credit** | **Int64** |  | 
-**file** | **String** |  | 
+**file** | **String** | filename of result to retrieve | 
 **id** | **UUID** | uuid v7 | 
-**image** | **String** |  | 
+**image** | **String** | filename of already uploaded image else default | 
 **messages** | [ApiChatMessage] | default value is non-empty array | 
 **model** | [**ApiAiModel**](ApiAiModel.md) |  | 
 **pay** | [**ApiPay**](ApiPay.md) |  | 

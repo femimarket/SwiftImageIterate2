@@ -21,12 +21,12 @@ Method | HTTP request | Description
 import Api
 
 let action = ApiAction() // ApiAction | 
-let audio = "audio_example" // String | 
+let audio = "audio_example" // String | filename of already uploaded audio else default
 let balance = 987 // Int64 | 
 let credit = 987 // Int64 | 
-let file = "file_example" // String | 
+let file = "file_example" // String | filename of result to retrieve
 let id = 987 // UUID | uuid v7
-let image = "image_example" // String | 
+let image = "image_example" // String | filename of already uploaded image else default
 let messages = [ApiChatMessage(content: "content_example", role: ApiChatRole())] // [ApiChatMessage] | default value is non-empty array
 let model = ApiAiModel() // ApiAiModel | 
 let pay = ApiPay(currency: "currency_example", id: 123, jws: "jws_example", loaded: false, orderId: "orderId_example", packageName: "packageName_example", price: 123, productId: "productId_example", provider: ApiPayProvider(), refId: "refId_example", userId: "userId_example") // ApiPay | 
@@ -53,12 +53,12 @@ ApiAPI.api(action: action, audio: audio, balance: balance, credit: credit, file:
 Name | Type | Description  | Notes
 ------------- | ------------- | ------------- | -------------
  **action** | [**ApiAction**](ApiAction.md) |  | 
- **audio** | **String** |  | 
+ **audio** | **String** | filename of already uploaded audio else default | 
  **balance** | **Int64** |  | 
  **credit** | **Int64** |  | 
- **file** | **String** |  | 
+ **file** | **String** | filename of result to retrieve | 
  **id** | **UUID** | uuid v7 | 
- **image** | **String** |  | 
+ **image** | **String** | filename of already uploaded image else default | 
  **messages** | [**[ApiChatMessage]**](ApiChatMessage.md) | default value is non-empty array | 
  **model** | [**ApiAiModel**](ApiAiModel.md) |  | 
  **pay** | [**ApiPay**](ApiPay.md) |  | 

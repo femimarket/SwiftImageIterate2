@@ -582,6 +582,31 @@ private struct DemoImageCanvas: View {
     }
 }
 
+// MARK: - Logger
+
+@inline(__always)
+private func log(_ tag: String, _ message: String) {
+    let t = Date().formatted(.dateTime.hour().minute().second().secondFraction(.fractional(3)))
+    print("⟶ \(t) \(tag) \(scrub(message))")
+}
+
+/// Strip base64/data-URI noise and any other base64-looking blob from log strings,
+/// so the console stays readable even when the server echoes the request back.
+private func scrub(_ s: String) -> String {
+    var out = s
+    if let range = out.range(of: "data:image/[a-z]+;base64,", options: .regularExpression) {
+        out.replaceSubrange(range.lowerBound..<out.endIndex, with: "<image-data-omitted>")
+    }
+    // Collapse any long base64-looking run (>120 chars of A-Za-z0-9+/=) to a placeholder.
+    out = out.replacingOccurrences(
+        of: "[A-Za-z0-9+/=]{120,}",
+        with: "<base64-blob-omitted>",
+        options: .regularExpression
+    )
+    if out.count > 800 { out = String(out.prefix(800)) + "…<truncated>" }
+    return out
+}
+
 // MARK: - Image Service — wraps the generated `Api` package
 //
 // Flow:
@@ -616,56 +641,101 @@ final class ImageService {
     private let mediaHost = "https://femi.market/"
 
     private init() {
+        log("INIT", "basePath=\(ApiAPIConfiguration.shared.basePath) bearer=\(bearer.prefix(8))…")
         ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(bearer)"
     }
 
     func generate(prompt: String, baseImage: UIImage, count: Int) async throws -> [UIImage] {
+        log("STEP 1", "encode base image → JPEG")
         guard let jpeg = baseImage.jpegData(compressionQuality: 0.85) else {
+            log("STEP 1 FAIL", "jpegData returned nil")
             throw ImageServiceError.encodingFailed
         }
-        let dataURI = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+        log("STEP 1 OK", "jpeg bytes=\(jpeg.count)")
 
-        return try await withThrowingTaskGroup(of: UIImage?.self) { group in
-            for _ in 0..<count {
+        log("STEP 2", "wrap into data URI (probably wrong — likely needs filename or upload ref)")
+        let dataURI = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+        log("STEP 2 OK", "dataURI chars=\(dataURI.count)")
+
+        log("STEP 3", "spawn \(count) parallel generations")
+        return try await withThrowingTaskGroup(of: Result<UIImage, Error>.self) { group in
+            for i in 0..<count {
                 group.addTask { [weak self] in
-                    guard let self else { return nil }
-                    return try? await self.singleGenerate(prompt: prompt, imageDataURI: dataURI)
+                    guard let self else { return .failure(ImageServiceError.requestFailed("service gone")) }
+                    do {
+                        log("STEP 3.\(i)", "begin singleGenerate")
+                        let img = try await self.singleGenerate(prompt: prompt, imageDataURI: dataURI, slot: i)
+                        log("STEP 3.\(i) OK", "image \(Int(img.size.width))x\(Int(img.size.height))")
+                        return .success(img)
+                    } catch let e as ImageServiceError {
+                        log("STEP 3.\(i) FAIL", e.errorDescription ?? "unknown")
+                        return .failure(e)
+                    } catch {
+                        log("STEP 3.\(i) FAIL", "\((error as NSError).domain) \((error as NSError).code)")
+                        return .failure(error)
+                    }
                 }
             }
             var images: [UIImage] = []
-            for try await img in group { if let img { images.append(img) } }
-            if images.isEmpty { throw ImageServiceError.requestFailed("no images returned") }
+            var firstError: Error?
+            for try await result in group {
+                switch result {
+                case .success(let img): images.append(img)
+                case .failure(let err): if firstError == nil { firstError = err }
+                }
+            }
+            let errSummary: String = {
+                guard let e = firstError else { return "none" }
+                return (e as? ImageServiceError)?.errorDescription ?? (e as NSError).localizedDescription
+            }()
+            log("STEP 3 DONE", "success=\(images.count)/\(count) firstError=\(errSummary)")
+            if images.isEmpty {
+                throw firstError ?? ImageServiceError.requestFailed("no images returned")
+            }
             return images
         }
     }
 
-    private func singleGenerate(prompt: String, imageDataURI: String) async throws -> UIImage {
-        // Kick off the job.
+    private func singleGenerate(prompt: String, imageDataURI: String, slot: Int) async throws -> UIImage {
+        log("[slot \(slot)] STEP 4", "POST /api action=Generate")
         let initial = try await call(
             action: .generate,
             id: UUID(),
             image: imageDataURI,
-            prompt: prompt
+            prompt: prompt,
+            slot: slot
         )
+        log("[slot \(slot)] STEP 4 OK", "id=\(initial.id) requestId='\(initial.requestId)' status=\(initial.status.rawValue) file='\(initial.file)' image.len=\(initial.image.count)")
 
-        // Poll every 3s for up to 120s, using the server-issued request_id as the handle.
         var current = initial
         let deadline = Date().addingTimeInterval(120)
+        var pollCount = 0
         while current.status == .pending {
-            if Date() > deadline { throw ImageServiceError.timedOut }
+            if Date() > deadline {
+                log("[slot \(slot)] STEP 5 TIMEOUT", "polled \(pollCount) times, still pending")
+                throw ImageServiceError.timedOut
+            }
             try await Task.sleep(nanoseconds: 3_000_000_000)
+            pollCount += 1
+            log("[slot \(slot)] STEP 5.\(pollCount)", "POST /api action=Poll requestId=\(current.requestId)")
             current = try await call(
                 action: .poll,
                 id: current.id,
                 requestId: current.requestId,
                 image: "",
-                prompt: ""
+                prompt: "",
+                slot: slot
             )
+            log("[slot \(slot)] STEP 5.\(pollCount) OK", "status=\(current.status.rawValue) file='\(current.file)' image.len=\(current.image.count)")
         }
 
-        guard current.status == .completed else { throw ImageServiceError.taskFailed }
+        guard current.status == .completed else {
+            log("[slot \(slot)] STEP 5 FAIL", "final status=\(current.status.rawValue)")
+            throw ImageServiceError.taskFailed
+        }
 
-        return try await fetchResultImage(reference: current.image)
+        log("[slot \(slot)] STEP 6", "fetch result media file='\(current.file)'")
+        return try await fetchResultImage(reference: current.file, slot: slot)
     }
 
     private func call(
@@ -673,10 +743,13 @@ final class ImageService {
         id: UUID,
         requestId: String = "",
         image: String,
-        prompt: String
+        prompt: String,
+        slot: Int
     ) async throws -> API {
+        let tag = "[slot \(slot)][\(action.rawValue)]"
+        log(tag, "→ POST \(ApiAPIConfiguration.shared.basePath)/api id=\(id) requestId='\(requestId)' image.len=\(image.count) prompt.len=\(prompt.count)")
         do {
-            return try await ApiAPI.api(
+            let result = try await ApiAPI.api(
                 action: action,
                 audio: "",
                 balance: 0,
@@ -693,27 +766,50 @@ final class ImageService {
                 status: .pending,
                 userId: ""
             )
-        } catch {
-            throw ImageServiceError.requestFailed("\(error)")
+            log(tag, "← OK status=\(result.status.rawValue)")
+            return result
+        } catch let ErrorResponse.error(status, data, _, underlying) {
+            let bodyRaw = data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
+            let body = scrub(bodyRaw)
+            let nsErr = underlying as NSError
+            log(tag, """
+                ← FAIL httpStatus=\(status) err=\(nsErr.domain):\(nsErr.code) (\(nsErr.localizedDescription))
+                       body[\(bodyRaw.count)]=\(body.prefix(300))
+                """)
+            let msg: String
+            if status > 0 {
+                msg = "HTTP \(status) — \(body.prefix(160))"
+            } else {
+                msg = "\(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)"
+            }
+            throw ImageServiceError.requestFailed(msg)
         }
     }
 
-    private func fetchResultImage(reference: String) async throws -> UIImage {
-        let url: URL
-        if let direct = URL(string: reference), direct.scheme != nil {
-            url = direct
-        } else {
-            let cleaned = reference.hasPrefix("/") ? String(reference.dropFirst()) : reference
-            guard let composed = URL(string: mediaHost + cleaned) else {
-                throw ImageServiceError.decodingFailed
-            }
-            url = composed
+    private func fetchResultImage(reference filename: String, slot: Int) async throws -> UIImage {
+        let tag = "[slot \(slot)][media]"
+        let cleaned = filename.hasPrefix("/") ? String(filename.dropFirst()) : filename
+        guard let url = URL(string: mediaHost + cleaned) else {
+            log(tag, "FAIL — couldn't form URL (filename.len=\(cleaned.count))")
+            throw ImageServiceError.decodingFailed
         }
+        log(tag, "→ GET host=\(url.host ?? "?") path.len=\(url.path.count)")
         var req = URLRequest(url: url)
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: req)
-        guard let img = UIImage(data: data) else { throw ImageServiceError.decodingFailed }
-        return img
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            log(tag, "← HTTP \(code) bytes=\(data.count)")
+            guard let img = UIImage(data: data) else {
+                log(tag, "FAIL — could not decode \(data.count) bytes as UIImage")
+                throw ImageServiceError.decodingFailed
+            }
+            return img
+        } catch {
+            let nsErr = error as NSError
+            log(tag, "FAIL — \(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)")
+            throw error
+        }
     }
 
     // Filler values for fields the server ignores on generate/poll.

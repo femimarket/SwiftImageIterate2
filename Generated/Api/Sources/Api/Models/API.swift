@@ -11,12 +11,15 @@ import Foundation
 public struct API: Sendable, Codable, Hashable {
 
     public var action: ApiAction
+    /** filename of already uploaded audio else default */
     public var audio: String
     public var balance: Int64
     public var credit: Int64
+    /** filename of result to retrieve */
     public var file: String
     /** uuid v7 */
     public var id: UUID
+    /** filename of already uploaded image else default */
     public var image: String
     /** default value is non-empty array */
     public var messages: [ApiChatMessage]

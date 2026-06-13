@@ -51,12 +51,12 @@ open class ApiAPI {
     /**
 
      - parameter action: (form)  
-     - parameter audio: (form)  
+     - parameter audio: (form) filename of already uploaded audio else default 
      - parameter balance: (form)  
      - parameter credit: (form)  
-     - parameter file: (form)  
+     - parameter file: (form) filename of result to retrieve 
      - parameter id: (form) uuid v7 
-     - parameter image: (form)  
+     - parameter image: (form) filename of already uploaded image else default 
      - parameter messages: (form) default value is non-empty array 
      - parameter model: (form)  
      - parameter pay: (form)  
@@ -78,12 +78,12 @@ open class ApiAPI {
        - type: http
        - name: bearer
      - parameter action: (form)  
-     - parameter audio: (form)  
+     - parameter audio: (form) filename of already uploaded audio else default 
      - parameter balance: (form)  
      - parameter credit: (form)  
-     - parameter file: (form)  
+     - parameter file: (form) filename of result to retrieve 
      - parameter id: (form) uuid v7 
-     - parameter image: (form)  
+     - parameter image: (form) filename of already uploaded image else default 
      - parameter messages: (form) default value is non-empty array 
      - parameter model: (form)  
      - parameter pay: (form)  
