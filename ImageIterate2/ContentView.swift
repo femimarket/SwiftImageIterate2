@@ -61,7 +61,6 @@ struct ContentView: View {
     @State private var errorBanner: String?
 
     @State private var showingFullScreen = false
-    @State private var savedFilenames: Set<String> = []
 
     @FocusState private var promptFocused: Bool
 
@@ -93,7 +92,7 @@ struct ContentView: View {
                 header
 
                 ScrollView {
-                    VStack(spacing: 22) {
+                    VStack(spacing: 14) {
                         heroCard
                             .padding(.horizontal, 22)
                             .padding(.top, 4)
@@ -101,6 +100,11 @@ struct ContentView: View {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 showingFullScreen = true
                             }
+
+                        // Static signal that the hero is the kept item. Solves model A's
+                        // discoverability hole without adding a verb anywhere.
+                        selectedLabel
+                            .padding(.top, -4)
 
                         if !history.isEmpty {
                             historyStrip
@@ -237,6 +241,26 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: heroBreath)
     }
 
+    // MARK: Selected label
+    //
+    // One-word static signal that the hero is the kept item. Sits directly
+    // under the hero so the relationship is visible without a verb.
+
+    private var selectedLabel: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(heroTint)
+                .frame(width: 5, height: 5)
+                .shadow(color: heroTint.opacity(0.7), radius: 3)
+            Text("SELECTED")
+                .font(.system(size: 10, weight: .heavy))
+                .tracking(2.5)
+                .foregroundStyle(.white.opacity(0.55))
+        }
+        .padding(.vertical, 4)
+        .animation(.easeInOut(duration: 0.4), value: heroTint)
+    }
+
     // MARK: History strip
 
     private var historyStrip: some View {
@@ -291,50 +315,28 @@ struct ContentView: View {
 
     private func variationCard(_ v: Variation) -> some View {
         Button { promote(v) } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(uiImage: v.image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 168, height: 168)
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: [.white.opacity(0.16), .clear, .black.opacity(0.12)],
-                                startPoint: .top, endPoint: .bottom))
-                            .blendMode(.plusLighter)
-                            .opacity(0.7)
-                            .allowsHitTesting(false)
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .strokeBorder(.white.opacity(0.20), lineWidth: 0.6)
-                    }
-                if savedFilenames.contains(v.filename) {
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(6)
-                        .background(Circle().fill(.black.opacity(0.55)))
-                        .padding(8)
+            Image(uiImage: v.image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 168, height: 168)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .fill(LinearGradient(
+                            colors: [.white.opacity(0.16), .clear, .black.opacity(0.12)],
+                            startPoint: .top, endPoint: .bottom))
+                        .blendMode(.plusLighter)
+                        .opacity(0.7)
+                        .allowsHitTesting(false)
                 }
-            }
-            .shadow(color: .black.opacity(0.50), radius: 16, y: 8)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(.white.opacity(0.20), lineWidth: 0.6)
+                }
+                .shadow(color: .black.opacity(0.50), radius: 16, y: 8)
         }
         .buttonStyle(PressableStyle(scale: 0.96))
-        .contextMenu {
-            Button {
-                save(v)
-            } label: {
-                Label(savedFilenames.contains(v.filename) ? "Saved" : "Save to Photos", systemImage: "heart")
-            }
-            Button(role: .destructive) {
-                discard(v)
-            } label: {
-                Label("Discard", systemImage: "trash")
-            }
-        }
     }
 
     // MARK: Empty state
@@ -442,13 +444,21 @@ struct ContentView: View {
                 .padding(.bottom, 14)
         }
         .padding(.top, 18)
-        .background(
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.75), .black],
-                startPoint: .top, endPoint: .bottom
-            )
+        .background {
+            ZStack(alignment: .top) {
+                // Solid black behind the controls so nothing bleeds through.
+                Color.black
+                // Soft fade above the controls — only ~24pt of transition so the
+                // hand-off from scroll content reads as a smooth cliff, not a vague wash.
+                LinearGradient(
+                    colors: [.clear, .black],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: 32)
+                .offset(y: -24)
+            }
             .ignoresSafeArea(edges: .bottom)
-        )
+        }
     }
 
     private var generateButton: some View {
@@ -548,21 +558,6 @@ struct ContentView: View {
         }
     }
 
-    private func save(_ v: Variation) {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        UIImageWriteToSavedPhotosAlbum(v.image, nil, nil, nil)
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            savedFilenames.insert(v.filename)
-        }
-    }
-
-    private func discard(_ v: Variation) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            variations.removeAll { $0.id == v.id }
-        }
-    }
-
     private func resetToDefault() {
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
         let demo = ContentView.makeDemoImage()
@@ -573,7 +568,6 @@ struct ContentView: View {
             heroTint = demoTint
             history.removeAll()
             variations.removeAll()
-            savedFilenames.removeAll()
             selectedVibes.removeAll()
             prompt = ""
             errorBanner = nil
