@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UIKit
+import Api
 
 // MARK: - Theme
 
@@ -581,13 +582,21 @@ private struct DemoImageCanvas: View {
     }
 }
 
-// MARK: - Image Service (z-image-turbo)
+// MARK: - Image Service — wraps the generated `Api` package
+//
+// Flow:
+//   1. POST /api with action=.generate, model=.zimageturbo, image=<data URI>, prompt
+//      → returns API with id and status=.pending
+//   2. POST /api with action=.poll, id=<that uuid> every 3s
+//      → eventually returns status=.completed with image=<file path/url>
+//   3. Resolve `image` (full URL or `_upload`-relative filename via mediaGate) → UIImage
 
 enum ImageServiceError: LocalizedError {
     case encodingFailed
     case requestFailed(String)
     case decodingFailed
     case timedOut
+    case taskFailed
 
     var errorDescription: String? {
         switch self {
@@ -595,28 +604,32 @@ enum ImageServiceError: LocalizedError {
         case .requestFailed(let s):  return s
         case .decodingFailed:        return "couldn't read result"
         case .timedOut:              return "took too long"
+        case .taskFailed:            return "generation failed"
         }
     }
-}
-
-private enum APIResult {
-    case url(URL)
-    case data(Data)
 }
 
 final class ImageService {
     static let shared = ImageService()
 
-    private let bearer  = "019ec07a-c943-7275-b758-2315b8c9fa6f"
-    private let baseURL = URL(string: "https://api.z.ai/api/paas/v4/images/generations")!
-    private let model   = "z-image-turbo"
+    private let bearer    = "019ec07a-c943-7275-b758-2315b8c9fa6f"
+    private let mediaHost = "https://femi.market/"
+
+    private init() {
+        ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(bearer)"
+    }
 
     func generate(prompt: String, baseImage: UIImage, count: Int) async throws -> [UIImage] {
-        try await withThrowingTaskGroup(of: UIImage?.self) { group in
+        guard let jpeg = baseImage.jpegData(compressionQuality: 0.85) else {
+            throw ImageServiceError.encodingFailed
+        }
+        let dataURI = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+
+        return try await withThrowingTaskGroup(of: UIImage?.self) { group in
             for _ in 0..<count {
                 group.addTask { [weak self] in
                     guard let self else { return nil }
-                    return try? await self.singleGenerate(prompt: prompt, baseImage: baseImage)
+                    return try? await self.singleGenerate(prompt: prompt, imageDataURI: dataURI)
                 }
             }
             var images: [UIImage] = []
@@ -626,94 +639,97 @@ final class ImageService {
         }
     }
 
-    private func singleGenerate(prompt: String, baseImage: UIImage) async throws -> UIImage {
-        guard let jpeg = baseImage.jpegData(compressionQuality: 0.85) else {
-            throw ImageServiceError.encodingFailed
-        }
-        let dataURI = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+    private func singleGenerate(prompt: String, imageDataURI: String) async throws -> UIImage {
+        // Kick off the job.
+        let initial = try await call(
+            action: .generate,
+            id: UUID(),
+            image: imageDataURI,
+            prompt: prompt
+        )
 
-        var req = URLRequest(url: baseURL)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        req.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model,
-            "prompt": prompt,
-            "image": dataURI,
-            "size": "1024x1024",
-            "n": 1
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
-            throw ImageServiceError.requestFailed("no response")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
-            throw ImageServiceError.requestFailed(body.prefix(140).description)
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-
-        if let result = extractImage(from: json) {
-            return try await materialize(result)
-        }
-        if let taskId = (json?["task_id"] as? String) ?? (json?["id"] as? String) {
-            return try await pollUntilDone(taskId: taskId)
-        }
-        throw ImageServiceError.decodingFailed
-    }
-
-    private func extractImage(from json: [String: Any]?) -> APIResult? {
-        guard let json else { return nil }
-        let candidates: [[String: Any]]
-        if let arr = json["data"] as? [[String: Any]] {
-            candidates = arr
-        } else {
-            candidates = [json]
-        }
-        for item in candidates {
-            if let s = (item["url"] as? String) ?? (item["image_url"] as? String),
-               let url = URL(string: s) { return .url(url) }
-            if let b64 = item["b64_json"] as? String,
-               let raw = Data(base64Encoded: b64) { return .data(raw) }
-        }
-        return nil
-    }
-
-    private func materialize(_ result: APIResult) async throws -> UIImage {
-        switch result {
-        case .url(let url):
-            let (data, _) = try await URLSession.shared.data(from: url)
-            guard let img = UIImage(data: data) else { throw ImageServiceError.decodingFailed }
-            return img
-        case .data(let data):
-            guard let img = UIImage(data: data) else { throw ImageServiceError.decodingFailed }
-            return img
-        }
-    }
-
-    private func pollUntilDone(taskId: String) async throws -> UIImage {
-        let pollURL = URL(string: "https://api.z.ai/api/paas/v4/async-result/\(taskId)")!
+        // Poll every 3s for up to 120s, using the server-issued request_id as the handle.
+        var current = initial
         let deadline = Date().addingTimeInterval(120)
-        while Date() < deadline {
+        while current.status == .pending {
+            if Date() > deadline { throw ImageServiceError.timedOut }
             try await Task.sleep(nanoseconds: 3_000_000_000)
-            var req = URLRequest(url: pollURL)
-            req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-            let (data, _) = try await URLSession.shared.data(for: req)
-            let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let status = (parsed?["task_status"] as? String) ?? (parsed?["status"] as? String) ?? ""
-            if ["SUCCESS", "completed", "succeeded"].contains(status) {
-                if let result = extractImage(from: parsed) {
-                    return try await materialize(result)
-                }
-            }
-            if ["FAILED", "failed", "error"].contains(status) {
-                throw ImageServiceError.requestFailed("task failed")
-            }
+            current = try await call(
+                action: .poll,
+                id: current.id,
+                requestId: current.requestId,
+                image: "",
+                prompt: ""
+            )
         }
-        throw ImageServiceError.timedOut
+
+        guard current.status == .completed else { throw ImageServiceError.taskFailed }
+
+        return try await fetchResultImage(reference: current.image)
     }
+
+    private func call(
+        action: ApiAction,
+        id: UUID,
+        requestId: String = "",
+        image: String,
+        prompt: String
+    ) async throws -> API {
+        do {
+            return try await ApiAPI.api(
+                action: action,
+                audio: "",
+                balance: 0,
+                credit: 0,
+                file: "",
+                id: id,
+                image: image,
+                messages: [ApiChatMessage(content: "", role: .user)],
+                model: .zimageturbo,
+                pay: Self.emptyPay,
+                pricing: Self.emptyPricing,
+                prompt: prompt,
+                requestId: requestId,
+                status: .pending,
+                userId: ""
+            )
+        } catch {
+            throw ImageServiceError.requestFailed("\(error)")
+        }
+    }
+
+    private func fetchResultImage(reference: String) async throws -> UIImage {
+        let url: URL
+        if let direct = URL(string: reference), direct.scheme != nil {
+            url = direct
+        } else {
+            let cleaned = reference.hasPrefix("/") ? String(reference.dropFirst()) : reference
+            guard let composed = URL(string: mediaHost + cleaned) else {
+                throw ImageServiceError.decodingFailed
+            }
+            url = composed
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        let (data, _) = try await URLSession.shared.data(for: req)
+        guard let img = UIImage(data: data) else { throw ImageServiceError.decodingFailed }
+        return img
+    }
+
+    // Filler values for fields the server ignores on generate/poll.
+    private static let emptyPay = ApiPay(
+        currency: "", id: UUID(), jws: "", loaded: false, orderId: nil,
+        packageName: "", price: 0, productId: "", provider: .apple,
+        refId: "", userId: ""
+    )
+
+    private static let emptyPricing = ApiPricing(
+        artist: 0, audio: 0, chat: 0, creator: 0, director: 0,
+        falFlux2Pro: 0, falNanoBanana2: 0, falZImageTurbo: 0,
+        gb: 0, generate: 0, id: UUID(), image: 0, lyricSync: 0,
+        microPixLyra: 0, microPixVega: 0, nanoPixLuna: 0, nanoRenSpica: 0,
+        question: 0, summary: 0, upload: 0
+    )
 }
 
 #Preview {
