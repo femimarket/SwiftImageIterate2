@@ -27,11 +27,10 @@ struct ContentView: View {
     @State private var addingNew = false
     @State private var runs: [Run] = ContentView.makeSeedRuns()
     @State private var editorVisible = true
-    /// Captured for the undo toast: the row just removed and where it sat,
-    /// so we can re-insert at the original index. Cleared on the auto-timer
-    /// or when the user explicitly undoes.
-    @State private var pendingUndo: (run: Run, index: Int)?
-    @State private var undoDismissTask: Task<Void, Never>?
+    /// Stack of recent row removals, each with its own 3-second grace
+    /// window. LIFO: tapping Undo restores the most recent. Successive
+    /// rapid removes don't clobber each other's undo opportunities.
+    @State private var pendingUndos: [PendingUndo] = []
 
     @FocusState private var focusedField: Field?
     enum Field: Hashable {
@@ -118,7 +117,7 @@ struct ContentView: View {
                     .padding(.bottom, 14)
             }
 
-            if pendingUndo != nil {
+            if !pendingUndos.isEmpty {
                 VStack {
                     Spacer()
                     undoToast
@@ -211,7 +210,9 @@ struct ContentView: View {
             Image(systemName: "trash")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.7))
-            Text("Result removed")
+            Text(pendingUndos.count > 1
+                 ? "\(pendingUndos.count) results removed"
+                 : "Result removed")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white)
             Spacer()
@@ -823,29 +824,29 @@ struct ContentView: View {
     private func removeRun(_ run: Run) {
         guard let idx = runs.firstIndex(where: { $0.id == run.id }) else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        let removed = runs[idx]
+        let undo = PendingUndo(run: runs[idx], index: idx)
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             runs.remove(at: idx)
-            pendingUndo = (removed, idx)
+            pendingUndos.append(undo)
         }
-        undoDismissTask?.cancel()
-        undoDismissTask = Task { @MainActor in
+        Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.2)) {
-                pendingUndo = nil
+                pendingUndos.removeAll { $0.id == undo.id }
             }
         }
     }
 
+    /// LIFO undo — restores the most recent removal first. Toast count
+    /// decrements after each tap; subsequent taps walk further back until
+    /// the stack drains or entries time out.
     private func undoRemove() {
-        guard let undo = pendingUndo else { return }
-        undoDismissTask?.cancel()
+        guard let undo = pendingUndos.last else { return }
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         let insertAt = min(undo.index, runs.count)
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             runs.insert(undo.run, at: insertAt)
-            pendingUndo = nil
+            pendingUndos.removeAll { $0.id == undo.id }
         }
     }
 
@@ -903,6 +904,12 @@ struct ContentView: View {
 struct Chip: Identifiable, Equatable {
     let id = UUID()
     var text: String
+}
+
+struct PendingUndo: Identifiable {
+    let id = UUID()
+    let run: Run
+    let index: Int
 }
 
 struct Run: Identifiable {
