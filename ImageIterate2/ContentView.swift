@@ -881,25 +881,22 @@ final class ImageService: @unchecked Sendable {
     /// `imageFilename` is the server-side filename of a previously-known image, or
     /// `""` to let the server use the default image.
     ///
-    /// Flow:
-    /// 1. Send `prompt` to chat → server returns N distinct variations of the
-    ///    user's idea (creative entropy — each prompt is derived from the same
-    ///    seed idea but phrased differently).
-    /// 2. Run N parallel generations, one per chat-expanded prompt.
-    /// This is what makes the "1 image, many iterations" flow feel creative
-    /// rather than producing N near-identical images from the same prompt.
+    /// Flow per slot:
+    /// 1. Chat call — sends the user's idea, returns ONE synthesized prompt
+    ///    (LLM temperature gives each slot a distinct creative interpretation).
+    /// 2. Generate call — uses that synthesized prompt + the source image to
+    ///    produce one variation.
+    /// N slots run end-to-end in parallel, giving creative entropy across the
+    /// results without unstructured-text parsing.
     func generate(prompt: String, imageFilename: String, count: Int) async throws -> [GenerationResult] {
-        log("STEP 0", "chat-expand 1 idea → \(count) distinct prompts")
-        let expandedPrompts = try await chatExpand(prompt: prompt, count: count)
-        log("STEP 0 OK", "received \(expandedPrompts.count) prompts")
-
-        log("STEP 1", "spawn \(expandedPrompts.count) parallel generations imageRef='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
+        log("STEP 0", "spawn \(count) end-to-end (chat→generate) slots imageRef='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
         return try await withThrowingTaskGroup(of: Result<GenerationResult, Error>.self) { group in
-            for (i, expandedPrompt) in expandedPrompts.enumerated() {
+            for i in 0..<count {
                 group.addTask { [weak self] in
                     guard let self else { return .failure(ImageServiceError.requestFailed("service gone")) }
                     do {
-                        let r = try await self.singleGenerate(prompt: expandedPrompt, imageFilename: imageFilename, slot: i)
+                        let synthesized = try await self.chatSynthesize(idea: prompt, slot: i)
+                        let r = try await self.singleGenerate(prompt: synthesized, imageFilename: imageFilename, slot: i)
                         log("STEP 1.\(i) OK", "image \(Int(r.image.size.width))x\(Int(r.image.size.height)) file='\(r.filename)'")
                         return .success(r)
                     } catch let e as ImageServiceError {
@@ -923,7 +920,7 @@ final class ImageService: @unchecked Sendable {
                 guard let e = firstError else { return "none" }
                 return (e as? ImageServiceError)?.errorDescription ?? (e as NSError).localizedDescription
             }()
-            log("STEP 1 DONE", "success=\(results.count)/\(expandedPrompts.count) firstError=\(errSummary)")
+            log("STEP 0 DONE", "success=\(results.count)/\(count) firstError=\(errSummary)")
             if results.isEmpty {
                 throw firstError ?? ImageServiceError.requestFailed("no images returned")
             }
@@ -931,50 +928,43 @@ final class ImageService: @unchecked Sendable {
         }
     }
 
-    /// Sends the user's idea to chat and gets back `count` distinct generation
-    /// prompts derived from it — each one a different angle on the same seed
-    /// idea, for creative entropy.
-    private func chatExpand(prompt: String, count: Int) async throws -> [String] {
-        let systemInstruction = """
-            You are an image-generation prompt expander. Given the user's idea, \
-            return exactly \(count) distinct image generation prompts, each on \
-            its own line, no numbering or bullet points. Each prompt should be \
-            a different creative interpretation of the same seed idea — same \
-            essence, distinct angles, vibes, compositions. Keep each prompt \
-            under 30 words.
+    /// Sends the user's idea to chat and gets back exactly one synthesized
+    /// generation prompt. LLM temperature provides natural variation when
+    /// this is called N times in parallel with the same input — each return
+    /// is a different creative interpretation of the same seed idea.
+    ///
+    /// Chat input goes via `messages` only. The `prompt:` field is left empty
+    /// for the chat request — it's an image-gen field that the server echoes
+    /// back unchanged, which would otherwise mask the synthesized output.
+    private func chatSynthesize(idea: String, slot: Int) async throws -> String {
+        let userIdea = idea.isEmpty ? "Surprise me — generate something interesting." : idea
+        log("[slot \(slot)] CHAT", "→ idea.len=\(userIdea.count)")
+
+        let synthesizerRequest = """
+            Make image prompt frame for Flux2. Reply with only the prompt, nothing else.
+            Idea: \(userIdea)
             """
-        let userPrompt = prompt.isEmpty ? "Surprise me — generate something interesting." : prompt
 
         let response = try await call(
             action: .chat,
             id: UUID(),
             image: "",
-            prompt: userPrompt,
-            messages: [
-                ApiChatMessage(content: systemInstruction, role: .user),
-                ApiChatMessage(content: userPrompt, role: .user)
-            ],
-            slot: -1
+            prompt: "",
+            messages: [ApiChatMessage(content: synthesizerRequest, role: .user)],
+            slot: slot
         )
 
-        // Expect: assistant messages (or a single newline-delimited assistant
-        // message) carrying the expanded prompts. Parse defensively — if the
-        // server returns fewer than `count`, pad by repeating the user's
-        // original prompt.
-        let assistantContents = response.messages
-            .filter { $0.role == .assistant }
-            .map(\.content)
-        let lines = assistantContents
-            .flatMap { $0.split(whereSeparator: \.isNewline) }
-            .map { String($0).trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
-        if lines.count >= count {
-            return Array(lines.prefix(count))
-        }
-        // Fallback: pad with the original to never block generation on a poor
-        // chat response.
-        return lines + Array(repeating: userPrompt, count: count - lines.count)
+        // The synthesized prompt comes back as the last assistant message. Fall
+        // back to `response.prompt` only if the assistant didn't reply, and to
+        // the original idea as last-resort so generation never blocks.
+        let synthesized: String = {
+            if let last = response.messages.last(where: { $0.role == .assistant })?.content,
+               !last.isEmpty { return last }
+            if !response.prompt.isEmpty, response.prompt != userIdea { return response.prompt }
+            return userIdea
+        }()
+        log("[slot \(slot)] CHAT OK", "synthesized.len=\(synthesized.count) (same as input: \(synthesized == userIdea))")
+        return synthesized
     }
 
     private func singleGenerate(prompt: String, imageFilename: String, slot: Int) async throws -> GenerationResult {
