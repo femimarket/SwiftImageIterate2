@@ -149,10 +149,10 @@ struct ContentView: View {
         .padding(.bottom, 14)
     }
 
-    /// Floating breadcrumb shown when the editor has scrolled out of view.
-    /// Tapping it springs the user back to the chip editor without losing
-    /// their current prompt — the active-row marker remains the at-rest
-    /// orientation cue, this pill is the one-tap rescue.
+    /// Floating status reader shown when the editor has scrolled out of view.
+    /// Displays the live joined prompt (truncated) so the user can confirm
+    /// restores from history without scrolling, and tap to spring back to
+    /// the editor when they want to edit.
     private func backToEditorPill(proxy: ScrollViewProxy) -> some View {
         Button {
             UIImpactFeedbackGenerator(style: .soft).impactOccurred()
@@ -160,15 +160,19 @@ struct ContentView: View {
                 proxy.scrollTo("editorTop", anchor: .top)
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text(chips.map(\.text).joined(separator: " · "))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Image(systemName: "arrow.up")
                     .font(.system(size: 10, weight: .heavy))
-                Text("Editing \(chips.count) \(chips.count == 1 ? "phrase" : "phrases")")
-                    .font(.system(size: 12, weight: .semibold))
+                    .opacity(0.85)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
+            .frame(maxWidth: 320)
             .background(
                 Capsule().fill(LinearGradient(
                     colors: [Color(red: 0.55, green: 0.20, blue: 1.0).opacity(0.92),
@@ -180,7 +184,7 @@ struct ContentView: View {
             .shadow(color: Color(red: 0.95, green: 0.30, blue: 0.65).opacity(0.35), radius: 12, y: 4)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Scroll back to editor")
+        .accessibilityLabel("Scroll back to editor. Current prompt: \(chips.map(\.text).joined(separator: ", "))")
     }
 
     private func sectionLabel(_ text: String) -> some View {
