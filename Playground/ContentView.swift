@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var newChipText: String = ""
     @State private var addingNew = false
     @State private var runs: [Run] = ContentView.makeSeedRuns()
+    @State private var editorVisible = true
 
     @FocusState private var focusedField: Field?
     enum Field: Hashable {
@@ -71,24 +72,41 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 header
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        sectionLabel("PROMPT")
-                        chipFlow
-                            .padding(.horizontal, 16)
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .top) {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 20) {
+                                sectionLabel("PROMPT")
+                                    .id("editorTop")
+                                chipFlow
+                                    .padding(.horizontal, 16)
+                                    .onScrollVisibilityChange { visible in
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            editorVisible = visible
+                                        }
+                                    }
 
-                        sectionLabel("PRESETS")
-                        presetRail
+                                sectionLabel("PRESETS")
+                                presetRail
 
-                        if !runs.isEmpty {
-                            sectionLabel("RESULTS")
-                            resultsSection
+                                if !runs.isEmpty {
+                                    sectionLabel("RESULTS")
+                                    resultsSection
+                                }
+                            }
+                            .padding(.vertical, 16)
+                        }
+                        .scrollIndicators(.hidden)
+                        .scrollDismissesKeyboard(.interactively)
+
+                        if !editorVisible && !chips.isEmpty {
+                            backToEditorPill(proxy: proxy)
+                                .padding(.top, 8)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                                .zIndex(1)
                         }
                     }
-                    .padding(.vertical, 16)
                 }
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
 
                 generateButton
                     .padding(.horizontal, 22)
@@ -129,6 +147,40 @@ struct ContentView: View {
         .padding(.horizontal, 22)
         .padding(.top, 8)
         .padding(.bottom, 14)
+    }
+
+    /// Floating breadcrumb shown when the editor has scrolled out of view.
+    /// Tapping it springs the user back to the chip editor without losing
+    /// their current prompt — the active-row marker remains the at-rest
+    /// orientation cue, this pill is the one-tap rescue.
+    private func backToEditorPill(proxy: ScrollViewProxy) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                proxy.scrollTo("editorTop", anchor: .top)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 10, weight: .heavy))
+                Text("Editing \(chips.count) \(chips.count == 1 ? "phrase" : "phrases")")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                Capsule().fill(LinearGradient(
+                    colors: [Color(red: 0.55, green: 0.20, blue: 1.0).opacity(0.92),
+                             Color(red: 1.0, green: 0.30, blue: 0.65).opacity(0.92)],
+                    startPoint: .leading, endPoint: .trailing
+                ))
+            )
+            .overlay(Capsule().strokeBorder(.white.opacity(0.3), lineWidth: 0.7))
+            .shadow(color: Color(red: 0.95, green: 0.30, blue: 0.65).opacity(0.35), radius: 12, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll back to editor")
     }
 
     private func sectionLabel(_ text: String) -> some View {
