@@ -11,13 +11,21 @@ import UIKit
 struct ContentView: View {
     @State private var chips: [Chip] = [
         Chip(text: "cinematic golden hour"),
-        Chip(text: "lone figure on a street"),
+        Chip(text: "lone figure on a misty cobblestone street"),
         Chip(text: "soft film grain"),
+        Chip(text: "warm tungsten streetlamps"),
+        Chip(text: "shallow depth of field"),
+        Chip(text: "muted teal and amber palette"),
+        Chip(text: "35mm anamorphic lens flare"),
+        Chip(text: "wet pavement reflections"),
+        Chip(text: "subject in long charcoal coat"),
+        Chip(text: "early 70s european arthouse mood"),
     ]
     @State private var editingId: Chip.ID?
     @State private var editingText: String = ""
     @State private var newChipText: String = ""
     @State private var addingNew = false
+    @State private var runs: [Run] = ContentView.makeSeedRuns()
 
     @FocusState private var focusedField: Field?
     enum Field: Hashable {
@@ -31,6 +39,11 @@ struct ContentView: View {
     /// prompt potentially over backend limits. Existing chips can still be
     /// edited and removed.
     private let maxChips = 20
+    /// Soft cap on history depth. Beyond this, oldest runs are dropped on
+    /// each Generate so the list stays scannable and the array small.
+    private let maxRuns = 30
+    /// How many parallel result rows each Generate spawns.
+    private let parallelRuns = 3
     private var atCap: Bool { chips.count >= maxChips }
 
     // MARK: Haptics
@@ -67,8 +80,10 @@ struct ContentView: View {
                         sectionLabel("PRESETS")
                         presetRail
 
-                        sectionLabel("PREVIEW")
-                        previewBlock
+                        if !runs.isEmpty {
+                            sectionLabel("RESULTS")
+                            resultsSection
+                        }
                     }
                     .padding(.vertical, 16)
                 }
@@ -154,7 +169,7 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.92))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 220, alignment: .leading)
+                    .frame(maxWidth: 300, alignment: .leading)
                     .onTapGesture {
                         beginEdit(chip)
                     }
@@ -277,34 +292,182 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Preview
+    // MARK: Results
 
-    private var previewBlock: some View {
-        Text(joinedPrompt.isEmpty ? "—" : joinedPrompt)
-            .font(.system(size: 14, weight: .regular, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.75))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.white.opacity(0.04))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
-            )
-            .padding(.horizontal, 22)
+    private var resultsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(runs) { run in
+                resultRow(run)
+            }
+        }
     }
 
-    private var joinedPrompt: String {
-        chips.map(\.text).filter { !$0.isEmpty }.joined(separator: ", ")
+    private func resultRow(_ run: Run) -> some View {
+        let active = isActive(run)
+        return Button {
+            restore(run)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                thumbnail(run)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(joinedPrompt(for: run))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(3)
+                        .truncationMode(.tail)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("\(run.chips.count) \(run.chips.count == 1 ? "phrase" : "phrases")")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(1.2)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+                VStack(spacing: 8) {
+                    heartButton(run)
+                    removeButton(run)
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(active ? 0.08 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        active
+                            ? AnyShapeStyle(LinearGradient(
+                                colors: [Color(red: 0.55, green: 0.20, blue: 1.0),
+                                         Color(red: 1.0, green: 0.30, blue: 0.65)],
+                                startPoint: .leading, endPoint: .trailing))
+                            : AnyShapeStyle(Color.white.opacity(0.08)),
+                        lineWidth: active ? 1.2 : 0.5
+                    )
+            )
+        }
+        .buttonStyle(RowPressStyle())
+        .padding(.horizontal, 22)
+        .accessibilityLabel("Restore prompt: \(run.chips.map(\.text).joined(separator: ", "))")
+        .transition(.scale(scale: 0.95).combined(with: .opacity))
+    }
+
+    private func heartButton(_ run: Run) -> some View {
+        Button {
+            toggleLike(run)
+        } label: {
+            Image(systemName: run.liked ? "heart.fill" : "heart")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(run.liked
+                    ? Color(red: 1.0, green: 0.30, blue: 0.65)
+                    : .white.opacity(0.55))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.white.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(run.liked ? "Unlike result" : "Like result")
+    }
+
+    private func removeButton(_ run: Run) -> some View {
+        Button {
+            removeRun(run)
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.5))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.white.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Remove result")
+    }
+
+    private func thumbnail(_ run: Run) -> some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(LinearGradient(
+                colors: run.gradient,
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            ))
+            .frame(width: 96, height: 96)
+            .overlay {
+                switch run.state {
+                case .loading:
+                    ShimmerOverlay()
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                case .loaded:
+                    EmptyView()
+                case .failed:
+                    ZStack {
+                        Color.black.opacity(0.45)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            }
+    }
+
+    /// Curated palettes that stand in for generated images in the playground.
+    /// The real Engineer screen swaps these for fetched bytes.
+    private static let gradientPalettes: [[Color]] = [
+        [Color(red: 1.00, green: 0.50, blue: 0.30), Color(red: 0.80, green: 0.20, blue: 0.50)],
+        [Color(red: 0.30, green: 0.50, blue: 1.00), Color(red: 0.60, green: 0.20, blue: 0.90)],
+        [Color(red: 0.95, green: 0.60, blue: 0.20), Color(red: 0.70, green: 0.30, blue: 0.70)],
+        [Color(red: 0.20, green: 0.60, blue: 0.70), Color(red: 0.50, green: 0.80, blue: 0.50)],
+        [Color(red: 0.60, green: 0.20, blue: 0.40), Color(red: 0.90, green: 0.40, blue: 0.60)],
+        [Color(red: 0.15, green: 0.25, blue: 0.45), Color(red: 0.70, green: 0.45, blue: 0.65)],
+    ]
+
+    /// Seeded history so the playground demonstrates the rendered failure
+    /// modes on first launch instead of needing the user to tap Generate
+    /// repeatedly. Varies chip-count, liked, and failed states to stress
+    /// the row layout the way real history would.
+    private static func makeSeedRuns() -> [Run] {
+        let seeds: [(words: [String], liked: Bool, failed: Bool)] = [
+            (["neon-soaked tokyo alleyway",
+              "rain-slick asphalt",
+              "shopkeeper closing for the night",
+              "vapor rising from a ramen stall",
+              "purple and cyan signage"], false, false),
+            (["pastel sunrise over salt flats",
+              "lone tree casting a long shadow"], true, false),
+            (["1920s parisian cafe",
+              "art deco interior",
+              "couple sharing a glance",
+              "soft window light",
+              "smoke curling from a cigarette holder",
+              "sepia tinted"], false, false),
+            (["brutalist concrete monolith against a bruised sky"], false, true),
+            (["dreamy underwater ballet",
+              "schools of bioluminescent fish",
+              "diver in vintage brass helmet",
+              "shafts of sunlight piercing kelp forest"], true, false),
+            (["surreal portrait", "moody lighting", "high contrast"], false, false),
+            (["red", "blue", "yellow", "green", "purple",
+              "orange", "pink", "teal", "magenta"], false, false),
+            (["vintage", "film", "neon"], false, false),
+            (["cyberpunk megacity",
+              "kowloon walled city aesthetic",
+              "rain-slick neon reflections",
+              "dense vertical density",
+              "advertising holograms",
+              "lone drone hovering"], false, false),
+        ]
+        return seeds.enumerated().map { (i, seed) in
+            Run(
+                chips: seed.words.map { Chip(text: $0) },
+                state: seed.failed ? .failed : .loaded,
+                gradient: gradientPalettes[i % gradientPalettes.count],
+                liked: seed.liked
+            )
+        }
     }
 
     // MARK: Generate
 
     private var generateButton: some View {
         Button {
-            print("⟶ generate: \(joinedPrompt)")
+            generate()
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "sparkles")
@@ -442,6 +605,86 @@ struct ContentView: View {
         commitAdd()
         focusedField = nil
     }
+
+    /// Fans out `parallelRuns` mocked synthesizes per Generate tap. Each row
+    /// appears shimmering, then resolves on its own jittered timeline so the
+    /// rail breathes like real parallel network calls. ~12% of mocked runs
+    /// fail, to exercise the failure-state path.
+    private func generate() {
+        dismissAll()
+        tap()
+        let snapshot = chips
+        let new = (0..<parallelRuns).map { _ in
+            Run(
+                chips: snapshot.map { Chip(text: $0.text) },
+                state: .loading,
+                gradient: Self.gradientPalettes.randomElement()!
+            )
+        }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            runs.insert(contentsOf: new, at: 0)
+            trimHistory()
+        }
+        for run in new {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(Double.random(in: 0.7...1.9)))
+                guard let idx = runs.firstIndex(where: { $0.id == run.id }) else { return }
+                let failed = Int.random(in: 0..<100) < 12
+                withAnimation(.easeOut(duration: 0.25)) {
+                    runs[idx].state = failed ? .failed : .loaded
+                }
+                if failed {
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                } else {
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                }
+            }
+        }
+    }
+
+    /// Tap a past run to replace the editor with its prompt. Fresh chip IDs
+    /// avoid collisions with the row that's still rendering the snapshot.
+    private func restore(_ run: Run) {
+        dismissAll()
+        tap()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            chips = run.chips.map { Chip(text: $0.text) }
+        }
+    }
+
+    private func removeRun(_ run: Run) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            runs.removeAll { $0.id == run.id }
+        }
+    }
+
+    private func toggleLike(_ run: Run) {
+        guard let idx = runs.firstIndex(where: { $0.id == run.id }) else { return }
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+            runs[idx].liked.toggle()
+        }
+    }
+
+    private func trimHistory() {
+        if runs.count > maxRuns {
+            runs.removeLast(runs.count - maxRuns)
+        }
+    }
+
+    /// A row is "active" when its prompt matches the editor's current chips.
+    /// Derived rather than tracked, so any edit naturally clears the marker
+    /// without instrumenting every chip mutation.
+    private func isActive(_ run: Run) -> Bool {
+        run.chips.map(\.text) == chips.map(\.text)
+    }
+
+    /// Joined sentence for the result row's summary. Middle-dot separator
+    /// reads more like a curated phrase list than a comma sentence would.
+    private func joinedPrompt(for run: Run) -> String {
+        run.chips.map(\.text).joined(separator: " · ")
+    }
 }
 
 // MARK: - Model
@@ -449,6 +692,55 @@ struct ContentView: View {
 struct Chip: Identifiable, Equatable {
     let id = UUID()
     var text: String
+}
+
+struct Run: Identifiable {
+    enum State {
+        case loading
+        case loaded
+        case failed
+    }
+
+    let id = UUID()
+    var chips: [Chip]
+    var state: State
+    let gradient: [Color]
+    var liked: Bool = false
+}
+
+/// Subtle press feedback for the result row — a tap target shouldn't feel
+/// silent, but the row is large so the effect is small.
+private struct RowPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+            .opacity(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Moving highlight band that drifts across its container forever. Used
+/// to mark thumbnails as in-flight before the real image arrives.
+private struct ShimmerOverlay: View {
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        GeometryReader { geo in
+            LinearGradient(
+                colors: [.white.opacity(0), .white.opacity(0.35), .white.opacity(0)],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: geo.size.width * 0.6)
+            .offset(x: phase * geo.size.width * 1.6)
+            .blendMode(.plusLighter)
+            .onAppear {
+                withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                    phase = 1.0
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
 }
 
 // MARK: - AutoChipField
