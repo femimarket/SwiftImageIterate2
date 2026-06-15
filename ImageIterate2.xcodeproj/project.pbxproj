@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		144C0BC22FDED26E0054A975 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 144C0BC12FDED26E0054A975 /* Api */; };
+		14F0D6292FDF5738005DEEA5 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 14F0D6282FDF5738005DEEA5 /* Api */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -54,6 +55,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				14F0D6292FDF5738005DEEA5 /* Api in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -66,6 +68,7 @@
 				14F0D4442FDD6B1400ABD6BB /* ImageIterate2 */,
 				1475AB122FDF041C00C86271 /* Playground */,
 				14F0D61D2FDF5711005DEEA5 /* Prod */,
+				14F0D6272FDF5738005DEEA5 /* Frameworks */,
 				14F0D4432FDD6B1400ABD6BB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -78,6 +81,13 @@
 				14F0D61C2FDF5711005DEEA5 /* Prod.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		14F0D6272FDF5738005DEEA5 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -145,6 +155,7 @@
 			);
 			name = Prod;
 			packageProductDependencies = (
+				14F0D6282FDF5738005DEEA5 /* Api */,
 			);
 			productName = Prod;
 			productReference = 14F0D61C2FDF5711005DEEA5 /* Prod.app */;
@@ -611,6 +622,11 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		144C0BC12FDED26E0054A975 /* Api */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */;
+			productName = Api;
+		};
+		14F0D6282FDF5738005DEEA5 /* Api */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */;
 			productName = Api;
