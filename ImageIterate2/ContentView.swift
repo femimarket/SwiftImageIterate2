@@ -670,12 +670,9 @@ public struct ContentView: View {
         }
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
 
-        let imageRef = heroFile
-
         do {
             let results = try await ImageService.shared.generate(
                 prompt: finalPrompt,
-                imageFilename: imageRef,
                 count: 2
             )
             withAnimation(.spring(response: 0.55, dampingFraction: 0.82)) {
@@ -829,25 +826,22 @@ nonisolated private func scrub(_ s: String) -> String {
 // MARK: - Image Service — wraps the generated `Api` package
 //
 // Flow:
-//   1. POST /api with action=.generate, model=.zimageturbo, image=<data URI>, prompt
-//      → returns API with id and status=.pending
-//   2. POST /api with action=.poll, id=<that uuid> every 3s
-//      → eventually returns status=.completed with image=<file path/url>
-//   3. Resolve `image` (full URL or `_upload`-relative filename via mediaGate) → UIImage
+//   1. POST /api with action=.typeClaudeSonnet46(...) carrying the synthesizer
+//      prompt → returns API whose action's last assistant message is the
+//      generation prompt.
+//   2. POST /api with action=.typeZImageTurbo(prompt) → returns API with
+//      status=.completed and `file` populated as base64 image bytes.
+//   3. Base64-decode `file` → UIImage.
 
 enum ImageServiceError: LocalizedError {
-    case encodingFailed
     case requestFailed(String)
     case decodingFailed
-    case timedOut
     case taskFailed
 
     var errorDescription: String? {
         switch self {
-        case .encodingFailed:        return "couldn't encode image"
         case .requestFailed(let s):  return s
         case .decodingFailed:        return "couldn't read result"
-        case .timedOut:              return "took too long"
         case .taskFailed:            return "generation failed"
         }
     }
@@ -878,32 +872,28 @@ final class ImageService: @unchecked Sendable {
         let filename: String
     }
 
-    /// `imageFilename` is the server-side filename of a previously-known image, or
-    /// `""` to let the server use the default image.
-    ///
     /// Flow per slot:
     /// 1. Chat call — sends the user's idea, returns ONE synthesized prompt
     ///    (LLM temperature gives each slot a distinct creative interpretation).
-    /// 2. Generate call — uses that synthesized prompt + the source image to
-    ///    produce one variation.
+    /// 2. Generate call — uses that synthesized prompt to produce one image.
     /// N slots run end-to-end in parallel, giving creative entropy across the
     /// results without unstructured-text parsing.
-    func generate(prompt: String, imageFilename: String, count: Int) async throws -> [GenerationResult] {
-        log("STEP 0", "spawn \(count) end-to-end (chat→generate) slots imageRef='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
+    func generate(prompt: String, count: Int) async throws -> [GenerationResult] {
+        log("FANOUT", "spawn \(count) end-to-end (chat→generate) slots")
         return try await withThrowingTaskGroup(of: Result<GenerationResult, Error>.self) { group in
             for i in 0..<count {
                 group.addTask { [weak self] in
                     guard let self else { return .failure(ImageServiceError.requestFailed("service gone")) }
                     do {
                         let synthesized = try await self.chatSynthesize(idea: prompt, slot: i)
-                        let r = try await self.singleGenerate(prompt: synthesized, imageFilename: imageFilename, slot: i)
-                        log("STEP 1.\(i) OK", "image \(Int(r.image.size.width))x\(Int(r.image.size.height)) file='\(r.filename)'")
+                        let r = try await self.singleGenerate(prompt: synthesized, slot: i)
+                        log("SLOT \(i) OK", "image \(Int(r.image.size.width))x\(Int(r.image.size.height))")
                         return .success(r)
                     } catch let e as ImageServiceError {
-                        log("STEP 1.\(i) FAIL", e.errorDescription ?? "unknown")
+                        log("SLOT \(i) FAIL", e.errorDescription ?? "unknown")
                         return .failure(e)
                     } catch {
-                        log("STEP 1.\(i) FAIL", "\((error as NSError).domain) \((error as NSError).code)")
+                        log("SLOT \(i) FAIL", "\((error as NSError).domain) \((error as NSError).code)")
                         return .failure(error)
                     }
                 }
@@ -920,7 +910,7 @@ final class ImageService: @unchecked Sendable {
                 guard let e = firstError else { return "none" }
                 return (e as? ImageServiceError)?.errorDescription ?? (e as NSError).localizedDescription
             }()
-            log("STEP 0 DONE", "success=\(results.count)/\(count) firstError=\(errSummary)")
+            log("FANOUT DONE", "success=\(results.count)/\(count) firstError=\(errSummary)")
             if results.isEmpty {
                 throw firstError ?? ImageServiceError.requestFailed("no images returned")
             }
@@ -945,100 +935,61 @@ final class ImageService: @unchecked Sendable {
             Idea: \(userIdea)
             """
 
-        let response = try await call(
-            action: .chat,
-            id: UUID(),
-            image: "",
-            prompt: "",
+        let chatAction: ApiAction = .typeClaudeSonnet46(ClaudeSonnet46(
             messages: [ApiChatMessage(content: synthesizerRequest, role: .user)],
-            slot: slot
-        )
+            type: .claudesonnet46
+        ))
+        let response = try await call(chatAction, id: UUID(), slot: slot)
 
-        // The synthesized prompt comes back as the last assistant message. Fall
-        // back to `response.prompt` only if the assistant didn't reply, and to
-        // the original idea as last-resort so generation never blocks.
+        // The synthesized prompt comes back as the last assistant message inside
+        // the response action. Fall back to the original idea as last-resort so
+        // generation never blocks on parsing.
         let synthesized: String = {
-            if let last = response.messages.last(where: { $0.role == .assistant })?.content,
-               !last.isEmpty { return last }
-            if !response.prompt.isEmpty, response.prompt != userIdea { return response.prompt }
+            if case .typeClaudeSonnet46(let chat) = response.action,
+               let last = chat.messages.last(where: { $0.role == .assistant })?.content,
+               !last.isEmpty {
+                return last
+            }
             return userIdea
         }()
         log("[slot \(slot)] CHAT OK", "synthesized.len=\(synthesized.count) (same as input: \(synthesized == userIdea))")
         return synthesized
     }
 
-    private func singleGenerate(prompt: String, imageFilename: String, slot: Int) async throws -> GenerationResult {
-        log("[slot \(slot)] STEP 2", "POST /api action=Generate image='\(imageFilename.isEmpty ? "<default>" : imageFilename)'")
-        let initial = try await call(
-            action: .generate,
-            id: UUID(),
-            image: imageFilename,
-            prompt: prompt,
-            slot: slot
-        )
-        log("[slot \(slot)] STEP 2 OK", "id=\(initial.id) requestId='\(initial.requestId)' status=\(initial.status.rawValue) file='\(initial.file)'")
+    private func singleGenerate(prompt: String, slot: Int) async throws -> GenerationResult {
+        log("[slot \(slot)] GEN", "POST /api action=ZImageTurbo prompt.len=\(prompt.count)")
+        let id = UUID()
+        let result = try await call(.typeZImageTurbo(ZImageTurbo(
+            falRequestId: "", file: "", prompt: prompt, type: .zimageturbo
+        )), id: id, slot: slot)
+        log("[slot \(slot)] GEN OK", "status=\(result.status.rawValue)")
 
-        var current = initial
-        let deadline = Date().addingTimeInterval(120)
-        var pollCount = 0
-        while current.status == .pending {
-            if Date() > deadline {
-                log("[slot \(slot)] STEP 3 TIMEOUT", "polled \(pollCount) times")
-                throw ImageServiceError.timedOut
-            }
-            try await Task.sleep(nanoseconds: 3_000_000_000)
-            pollCount += 1
-            log("[slot \(slot)] STEP 3.\(pollCount)", "POST /api action=Poll requestId='\(current.requestId)'")
-            current = try await call(
-                action: .poll,
-                id: current.id,
-                requestId: current.requestId,
-                image: "",
-                prompt: "",
-                slot: slot
-            )
-            log("[slot \(slot)] STEP 3.\(pollCount) OK", "status=\(current.status.rawValue) file='\(current.file)'")
-        }
-
-        guard current.status == .completed else {
-            log("[slot \(slot)] STEP 3 FAIL", "final status=\(current.status.rawValue)")
+        guard result.status == .completed else {
+            log("[slot \(slot)] GEN FAIL", "final status=\(result.status.rawValue)")
             throw ImageServiceError.taskFailed
         }
+        guard case .typeZImageTurbo(let zit) = result.action else {
+            log("[slot \(slot)] GEN FAIL", "unexpected action in response")
+            throw ImageServiceError.decodingFailed
+        }
 
-        log("[slot \(slot)] STEP 4", "fetch result media file='\(current.file)'")
-        let (img, data) = try await fetchResultImage(reference: current.file, slot: slot)
-        return GenerationResult(image: img, data: data, filename: current.file)
+        log("[slot \(slot)] DECODE", "base64 len=\(zit.file.count)")
+        let (img, data) = try Self.decodeBase64Image(zit.file)
+        return GenerationResult(image: img, data: data, filename: "\(id.uuidString).png")
     }
 
-    private func call(
-        action: ApiAction,
-        id: UUID,
-        requestId: String = "",
-        image: String,
-        prompt: String,
-        messages: [ApiChatMessage] = [ApiChatMessage(content: "", role: .user)],
-        slot: Int
-    ) async throws -> API {
-        let tag = "[slot \(slot)][\(action.rawValue)]"
-        log(tag, "→ POST \(ApiAPIConfiguration.shared.basePath)/api id=\(id) requestId='\(requestId)' image.len=\(image.count) prompt.len=\(prompt.count) messages=\(messages.count)")
+    private func call(_ action: ApiAction, id: UUID, slot: Int) async throws -> API {
+        let tag = "[slot \(slot)]"
+        log(tag, "→ POST \(ApiAPIConfiguration.shared.basePath)/api id=\(id)")
+        let req = API(
+            action: action,
+            credit: 0,
+            id: id,
+            status: .pending,
+            userId: ""
+        )
         do {
-            let result = try await ApiAPI.api(
-                action: action,
-                audio: "",
-                balance: 0,
-                credit: 0,
-                file: "",
-                id: id,
-                image: image,
-                messages: messages,
-                model: .zimageturbo,
-                pay: Self.emptyPay,
-                pricing: Self.emptyPricing,
-                prompt: prompt,
-                requestId: requestId,
-                status: .pending,
-                userId: ""
-            )
+            let result = try await ApiHandlerAPI.apiHandler(API: req)
             log(tag, "← OK status=\(result.status.rawValue)")
             return result
         } catch let ErrorResponse.error(status, data, _, underlying) {
@@ -1059,38 +1010,23 @@ final class ImageService: @unchecked Sendable {
         }
     }
 
-    private func fetchResultImage(reference filename: String, slot: Int) async throws -> (UIImage, Data) {
-        let tag = "[slot \(slot)][media]"
-        log(tag, "→ MediaApi.fetch filename.len=\(filename.count)")
-        do {
-            let data = try await MediaApi.fetch(filename, idToken: bearer)
-            log(tag, "← bytes=\(data.count)")
-            guard let img = UIImage(data: data) else {
-                log(tag, "FAIL — could not decode \(data.count) bytes as UIImage")
-                throw ImageServiceError.decodingFailed
-            }
-            return (img, data)
-        } catch {
-            let nsErr = error as NSError
-            log(tag, "FAIL — \(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)")
-            throw error
+    /// Decodes the model `file` field (base64, optionally prefixed with a
+    /// data URI scheme) into raw PNG bytes plus a UIImage.
+    static func decodeBase64Image(_ encoded: String) throws -> (UIImage, Data) {
+        let stripped: String
+        if let comma = encoded.firstIndex(of: ",") {
+            stripped = String(encoded[encoded.index(after: comma)...])
+        } else {
+            stripped = encoded
         }
+        guard let data = Data(base64Encoded: stripped, options: [.ignoreUnknownCharacters]) else {
+            throw ImageServiceError.decodingFailed
+        }
+        guard let img = UIImage(data: data) else {
+            throw ImageServiceError.decodingFailed
+        }
+        return (img, data)
     }
-
-    // Filler values for fields the server ignores on generate/poll.
-    private static let emptyPay = ApiPay(
-        currency: "", id: UUID(), jws: "", loaded: false, orderId: nil,
-        packageName: "", price: 0, productId: "", provider: .apple,
-        refId: "", userId: ""
-    )
-
-    private static let emptyPricing = ApiPricing(
-        artist: 0, audio: 0, chat: 0, creator: 0, director: 0,
-        falFlux2Pro: 0, falNanoBanana2: 0, falZImageTurbo: 0,
-        gb: 0, generate: 0, id: UUID(), image: 0, lyricSync: 0,
-        microPixLyra: 0, microPixVega: 0, nanoPixLuna: 0, nanoRenSpica: 0,
-        question: 0, summary: 0, upload: 0
-    )
 }
 
 // MARK: - Fullscreen image viewer

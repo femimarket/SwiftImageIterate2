@@ -7,8 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		144C0BC22FDED26E0054A975 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 144C0BC12FDED26E0054A975 /* Api */; };
-		14F0D6292FDF5738005DEEA5 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 14F0D6282FDF5738005DEEA5 /* Api */; };
+		14D996EB2FE58291002C5CF6 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 14D996EA2FE58291002C5CF6 /* Api */; };
+		14D996ED2FE582A8002C5CF6 /* Api in Frameworks */ = {isa = PBXBuildFile; productRef = 14D996EC2FE582A8002C5CF6 /* Api */; };
+		14D998982FE5A745002C5CF6 /* ProjectService in Frameworks */ = {isa = PBXBuildFile; productRef = 14D998972FE5A745002C5CF6 /* ProjectService */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,7 +48,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				144C0BC22FDED26E0054A975 /* Api in Frameworks */,
+				14D996ED2FE582A8002C5CF6 /* Api in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -55,7 +56,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				14F0D6292FDF5738005DEEA5 /* Api in Frameworks */,
+				14D998982FE5A745002C5CF6 /* ProjectService in Frameworks */,
+				14D996EB2FE58291002C5CF6 /* Api in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -132,7 +134,7 @@
 			);
 			name = ImageIterate2;
 			packageProductDependencies = (
-				144C0BC12FDED26E0054A975 /* Api */,
+				14D996EC2FE582A8002C5CF6 /* Api */,
 			);
 			productName = ImageIterate2;
 			productReference = 14F0D4422FDD6B1400ABD6BB /* ImageIterate2.app */;
@@ -155,7 +157,8 @@
 			);
 			name = Prod;
 			packageProductDependencies = (
-				14F0D6282FDF5738005DEEA5 /* Api */,
+				14D996EA2FE58291002C5CF6 /* Api */,
+				14D998972FE5A745002C5CF6 /* ProjectService */,
 			);
 			productName = Prod;
 			productReference = 14F0D61C2FDF5711005DEEA5 /* Prod.app */;
@@ -192,7 +195,8 @@
 			mainGroup = 14F0D4392FDD6B1400ABD6BB;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */,
+				14D996E92FE58291002C5CF6 /* XCRemoteSwiftPackageReference "swiftapi" */,
+				14D998962FE5A745002C5CF6 /* XCRemoteSwiftPackageReference "swift-project-service" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 14F0D4432FDD6B1400ABD6BB /* Products */;
@@ -610,26 +614,39 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */ = {
+		14D996E92FE58291002C5CF6 /* XCRemoteSwiftPackageReference "swiftapi" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/femimarket/swiftapi";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.1.0;
+				branch = main;
+				kind = branch;
+			};
+		};
+		14D998962FE5A745002C5CF6 /* XCRemoteSwiftPackageReference "swift-project-service" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/femimarket/swift-project-service";
+			requirement = {
+				branch = main;
+				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		144C0BC12FDED26E0054A975 /* Api */ = {
+		14D996EA2FE58291002C5CF6 /* Api */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */;
+			package = 14D996E92FE58291002C5CF6 /* XCRemoteSwiftPackageReference "swiftapi" */;
 			productName = Api;
 		};
-		14F0D6282FDF5738005DEEA5 /* Api */ = {
+		14D996EC2FE582A8002C5CF6 /* Api */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 144C0BC02FDED26E0054A975 /* XCRemoteSwiftPackageReference "swiftapi" */;
+			package = 14D996E92FE58291002C5CF6 /* XCRemoteSwiftPackageReference "swiftapi" */;
 			productName = Api;
+		};
+		14D998972FE5A745002C5CF6 /* ProjectService */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 14D998962FE5A745002C5CF6 /* XCRemoteSwiftPackageReference "swift-project-service" */;
+			productName = ProjectService;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

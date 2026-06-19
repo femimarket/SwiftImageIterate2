@@ -10,6 +10,7 @@
 import SwiftUI
 import UIKit
 import Api
+import ProjectService
 
 // MARK: - Models
 
@@ -33,7 +34,7 @@ struct Run: Identifiable {
     let id: UUID
     var chips: [Chip]
     var state: State
-    /// Disk filename under `Documents/engineer/`. Empty until loaded.
+    /// Disk filename under `Documents/` (via ProjectService). Empty until loaded.
     var imageFilename: String
     /// Decoded image, cached after first read so the row doesn't re-decode
     /// every render. Nil while loading or failed.
@@ -42,9 +43,6 @@ struct Run: Identifiable {
     /// Index into `gradientPalettes` — used as the shimmer/failure backdrop
     /// and the fallback if decoding fails.
     let paletteIndex: Int
-    /// Shared across the rows from one Generate tap so the UI can group them
-    /// under one batch header.
-    let batchId: UUID
     let createdAt: Date
 
     init(
@@ -55,7 +53,6 @@ struct Run: Identifiable {
         image: UIImage? = nil,
         liked: Bool = false,
         paletteIndex: Int,
-        batchId: UUID,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -65,13 +62,13 @@ struct Run: Identifiable {
         self.image = image
         self.liked = liked
         self.paletteIndex = paletteIndex
-        self.batchId = batchId
         self.createdAt = createdAt
     }
 }
 
 /// One batch as rendered in the RESULTS section. Grouping is derived from
-/// `Run.batchId`; this struct only exists to give ForEach a stable identity.
+/// `Run.createdAt` (rounded into a 2-second window) — runs that landed from
+/// one Generate tap share a bucket. `id` just gives ForEach stable identity.
 struct RunBatch: Identifiable {
     let id: UUID
     let createdAt: Date
@@ -84,61 +81,16 @@ struct PendingUndo: Identifiable {
     let index: Int
 }
 
-/// On-disk record of one row. Only `.loaded` runs persist — anything mid-flight
-/// when the app dies is dropped. `batchId` and `createdAt` decode-if-present so
-/// runs written by earlier builds still load (they each become their own batch
-/// with timestamp = now).
-private struct PersistedRun: Codable {
-    let id: UUID
-    let chips: [Chip]
-    let imageFilename: String
-    let liked: Bool
-    let paletteIndex: Int
-    let batchId: UUID
-    let createdAt: Date
-
-    enum CodingKeys: String, CodingKey {
-        case id, chips, imageFilename, liked, paletteIndex, batchId, createdAt
-    }
-
-    init(id: UUID, chips: [Chip], imageFilename: String, liked: Bool, paletteIndex: Int, batchId: UUID, createdAt: Date) {
-        self.id = id
-        self.chips = chips
-        self.imageFilename = imageFilename
-        self.liked = liked
-        self.paletteIndex = paletteIndex
-        self.batchId = batchId
-        self.createdAt = createdAt
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(UUID.self, forKey: .id)
-        chips = try c.decode([Chip].self, forKey: .chips)
-        imageFilename = try c.decode(String.self, forKey: .imageFilename)
-        liked = try c.decode(Bool.self, forKey: .liked)
-        paletteIndex = try c.decode(Int.self, forKey: .paletteIndex)
-        batchId = try c.decodeIfPresent(UUID.self, forKey: .batchId) ?? UUID()
-        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
-    }
-}
-
 // MARK: - Persistence
+//
+// Source of truth is the disk via ProjectService. Each row is one PNG under
+// `Documents/<runId>.png` with chips embedded as IPTC keywords, the joined
+// prompt as IPTC Caption/Abstract, the model as TIFF Software, and the like
+// state as IPTC StarRating. The editor's working chip set lives separately
+// in UserDefaults because it's not a generation, just typing in progress.
 
 private enum Store {
     private static let chipsKey = "engineerChips.v1"
-    private static let runsKey = "engineerRuns.v1"
-
-    /// `Documents/engineer/` — all image bytes live here.
-    private static var dir: URL {
-        let d = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("engineer", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: d.path) {
-            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        }
-        return d
-    }
 
     static func loadChips() -> [Chip] {
         guard let data = UserDefaults.standard.data(forKey: chipsKey),
@@ -153,57 +105,64 @@ private enum Store {
         UserDefaults.standard.set(data, forKey: chipsKey)
     }
 
+    /// Walks `Documents/` via ProjectService and reconstructs Runs from each
+    /// PNG's embedded XMP (subject keywords → chips, rating → liked) plus the
+    /// file's creation date. Newest first. No sidecar — the disk IS the index.
     static func loadRuns() -> [Run] {
-        guard let data = UserDefaults.standard.data(forKey: runsKey),
-              let persisted = try? JSONDecoder().decode([PersistedRun].self, from: data) else {
-            return []
-        }
-        return persisted.compactMap { p in
-            let url = dir.appendingPathComponent(p.imageFilename)
-            guard let data = try? Data(contentsOf: url),
-                  let img = UIImage(data: data) else {
-                return nil
+        ProjectService.getAllGenerations()
+            .filter { $0.pathExtension.lowercased() == "png" }
+            .compactMap { url -> Run? in
+                let filename = url.lastPathComponent
+                guard let bytes = try? Data(contentsOf: url),
+                      let img = UIImage(data: bytes) else {
+                    return nil
+                }
+                let chipTexts = ProjectService.getSubject(filename) ?? []
+                let liked = ProjectService.getLike(filename)
+                let createdAt: Date = {
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                    return (attrs?[.creationDate] as? Date) ?? Date()
+                }()
+                let runId = UUID(uuidString: url.deletingPathExtension().lastPathComponent) ?? UUID()
+                return Run(
+                    id: runId,
+                    chips: chipTexts.map { Chip(text: $0) },
+                    state: .loaded,
+                    imageFilename: filename,
+                    image: img,
+                    liked: liked,
+                    paletteIndex: abs(filename.hashValue),
+                    createdAt: createdAt
+                )
             }
-            return Run(
-                id: p.id,
-                chips: p.chips,
-                state: .loaded,
-                imageFilename: p.imageFilename,
-                image: img,
-                liked: p.liked,
-                paletteIndex: p.paletteIndex,
-                batchId: p.batchId,
-                createdAt: p.createdAt
-            )
-        }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
-    static func saveRuns(_ runs: [Run]) {
-        let persisted = runs
-            .filter { $0.state == .loaded && !$0.imageFilename.isEmpty }
-            .map { PersistedRun(
-                id: $0.id,
-                chips: $0.chips,
-                imageFilename: $0.imageFilename,
-                liked: $0.liked,
-                paletteIndex: $0.paletteIndex,
-                batchId: $0.batchId,
-                createdAt: $0.createdAt
-            )}
-        guard let data = try? JSONEncoder().encode(persisted) else { return }
-        UserDefaults.standard.set(data, forKey: runsKey)
-    }
-
+    /// Persists the generated bytes with chips embedded as IPTC keywords,
+    /// joined prompt as Caption/Abstract, and the model name as TIFF Software.
+    /// Returns the on-disk filename.
     @discardableResult
-    static func writeImage(_ data: Data, runId: UUID) -> String {
+    static func saveRun(data: Data, runId: UUID, chips: [Chip]) -> String {
         let filename = "\(runId.uuidString).png"
-        try? data.write(to: dir.appendingPathComponent(filename))
+        ProjectService.saveFile(
+            data,
+            named: filename,
+            prompt: chips.map(\.text).joined(separator: ", "),
+            model: "Flux2Pro",
+            subject: chips.map(\.text)
+        )
         return filename
     }
 
+    static func setLiked(filename: String, liked: Bool) {
+        ProjectService.like(filename, liked)
+    }
+
+    /// ProjectService doesn't expose a delete primitive; resolve the URL
+    /// through it so we share the same path convention, then unlink.
     static func deleteImage(filename: String) {
         guard !filename.isEmpty else { return }
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(filename))
+        try? FileManager.default.removeItem(at: ProjectService.getUrl(for: filename))
     }
 }
 
@@ -212,14 +171,12 @@ private enum Store {
 enum ImageServiceError: LocalizedError {
     case requestFailed(String)
     case decodingFailed
-    case timedOut
     case taskFailed
 
     var errorDescription: String? {
         switch self {
         case .requestFailed(let s): return s
         case .decodingFailed: return "couldn't read result"
-        case .timedOut: return "took too long"
         case .taskFailed: return "generation failed"
         }
     }
@@ -238,12 +195,12 @@ final class ImageService: @unchecked Sendable {
     }
 
     /// One end-to-end synth+generate. Caller supplies the joined prompt; we
-    /// run the chat synthesizer to creatively reframe it, then drive the
-    /// generate+poll loop and fetch the resulting bytes.
+    /// run the chat synthesizer to creatively reframe it, then call generate
+    /// which returns the image bytes inline (synchronous on this API).
     func synthesizeAndGenerate(idea: String) async throws -> (data: Data, serverFilename: String) {
         let synthesized = try await chatSynthesize(idea: idea)
         try Task.checkCancellation()
-        return try await generateAndPoll(prompt: synthesized)
+        return try await generate(prompt: synthesized)
     }
 
     /// Sends the user's idea to chat and returns one synthesized image prompt.
@@ -255,75 +212,45 @@ final class ImageService: @unchecked Sendable {
             Make image prompt frame for Flux2. Reply with only the prompt, nothing else.
             Idea: \(userIdea)
             """
-        let response = try await call(
-            action: .chat,
-            id: UUID(),
-            image: "",
-            prompt: "",
-            messages: [ApiChatMessage(content: synthesizerRequest, role: .user)]
-        )
-        if let last = response.messages.last(where: { $0.role == .assistant })?.content,
+        let chatAction: ApiAction = .typeClaudeSonnet46(ClaudeSonnet46(
+            messages: [ApiChatMessage(content: synthesizerRequest, role: .user)],
+            type: .claudesonnet46
+        ))
+        let response = try await call(chatAction, id: UUID())
+        if case .typeClaudeSonnet46(let chat) = response.action,
+           let last = chat.messages.last(where: { $0.role == .assistant })?.content,
            !last.isEmpty {
             return last
-        }
-        if !response.prompt.isEmpty, response.prompt != userIdea {
-            return response.prompt
         }
         return userIdea
     }
 
-    private func generateAndPoll(prompt: String) async throws -> (Data, String) {
-        let initial = try await call(
-            action: .generate,
-            id: UUID(),
-            image: "",
-            prompt: prompt
-        )
-        var current = initial
-        let deadline = Date().addingTimeInterval(120)
-        while current.status == .pending {
-            try Task.checkCancellation()
-            if Date() > deadline { throw ImageServiceError.timedOut }
-            try await Task.sleep(nanoseconds: 3_000_000_000)
-            current = try await call(
-                action: .poll,
-                id: current.id,
-                requestId: current.requestId,
-                image: "",
-                prompt: ""
-            )
+    /// Single call → base64-decode. The result `file` is image bytes encoded
+    /// inline as base64 (optionally with a `data:image/...;base64,` prefix),
+    /// so the request returns the finished image in one round-trip.
+    private func generate(prompt: String) async throws -> (Data, String) {
+        let id = UUID()
+        let result = try await call(.typeFlux2Pro(Flux2Pro(
+            falRequestId: "", file: "", prompt: prompt, type: .flux2Pro
+        )), id: id)
+        guard result.status == .completed else { throw ImageServiceError.taskFailed }
+        guard case .typeFlux2Pro(let fp) = result.action else {
+            throw ImageServiceError.decodingFailed
         }
-        guard current.status == .completed else { throw ImageServiceError.taskFailed }
-        let data = try await fetchMedia(filename: current.file)
-        return (data, current.file)
+        let data = try Self.decodeBase64(fp.file)
+        return (data, "\(id.uuidString).png")
     }
 
-    private func call(
-        action: ApiAction,
-        id: UUID,
-        requestId: String = "",
-        image: String,
-        prompt: String,
-        messages: [ApiChatMessage] = [ApiChatMessage(content: "", role: .user)]
-    ) async throws -> API {
+    private func call(_ action: ApiAction, id: UUID) async throws -> API {
+        let req = API(
+            action: action,
+            credit: 0,
+            id: id,
+            status: .pending,
+            userId: ""
+        )
         do {
-            return try await ApiAPI.api(
-                action: action,
-                audio: "",
-                balance: 0,
-                credit: 0,
-                file: "",
-                id: id,
-                image: image,
-                messages: messages,
-                model: .flux2Pro,
-                pay: Self.emptyPay,
-                pricing: Self.emptyPricing,
-                prompt: prompt,
-                requestId: requestId,
-                status: .pending,
-                userId: ""
-            )
+            return try await ApiHandlerAPI.apiHandler(API: req)
         } catch let ErrorResponse.error(status, data, _, underlying) {
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             let ns = underlying as NSError
@@ -334,44 +261,20 @@ final class ImageService: @unchecked Sendable {
         }
     }
 
-    /// Authenticated fetch of a result image. Mirrors MediaApi from the
-    /// Iterate library — kept inline so the Prod target stays self-contained.
-    private func fetchMedia(filename: String) async throws -> Data {
-        let path = filename.hasPrefix("/") ? String(filename.dropFirst()) : filename
-        guard !path.isEmpty, let url = URL(string: "https://femi.market/\(path)") else {
-            throw ImageServiceError.requestFailed("bad media path")
+    /// Decodes the `file` field returned by the model (base64, optionally
+    /// prefixed with a `data:image/...;base64,` URI scheme) into raw bytes.
+    private static func decodeBase64(_ encoded: String) throws -> Data {
+        let stripped: String
+        if let comma = encoded.firstIndex(of: ",") {
+            stripped = String(encoded[encoded.index(after: comma)...])
+        } else {
+            stripped = encoded
         }
-        var req = URLRequest(url: url)
-        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await Self.mediaSession.data(for: req)
+        guard let data = Data(base64Encoded: stripped, options: [.ignoreUnknownCharacters]) else {
+            throw ImageServiceError.decodingFailed
+        }
         return data
     }
-
-    private static let mediaSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 6
-        config.requestCachePolicy = .returnCacheDataElseLoad
-        config.urlCache = URLCache(
-            memoryCapacity: 64 * 1024 * 1024,
-            diskCapacity: 256 * 1024 * 1024
-        )
-        config.timeoutIntervalForRequest = 30
-        return URLSession(configuration: config)
-    }()
-
-    private static let emptyPay = ApiPay(
-        currency: "", id: UUID(), jws: "", loaded: false, orderId: nil,
-        packageName: "", price: 0, productId: "", provider: .apple,
-        refId: "", userId: ""
-    )
-
-    private static let emptyPricing = ApiPricing(
-        artist: 0, audio: 0, chat: 0, creator: 0, director: 0,
-        falFlux2Pro: 0, falNanoBanana2: 0, falZImageTurbo: 0,
-        gb: 0, generate: 0, id: UUID(), image: 0, lyricSync: 0,
-        microPixLyra: 0, microPixVega: 0, nanoPixLuna: 0, nanoRenSpica: 0,
-        question: 0, summary: 0, upload: 0
-    )
 }
 
 // MARK: - ContentView
@@ -860,23 +763,30 @@ struct ContentView: View {
         .padding(.horizontal, 22)
     }
 
-    /// Groups consecutive runs with the same `batchId` into one render unit.
-    /// Order is preserved — a run can't migrate batches, so we walk linearly.
+    /// Groups consecutive runs into 2-second `createdAt` buckets — runs from
+    /// one Generate tap share a bucket because they're stamped within ms of
+    /// each other. After reload, the file's creation date drives bucketing
+    /// just as well as the in-memory timestamp.
     private func batched(_ runs: [Run]) -> [RunBatch] {
         var result: [RunBatch] = []
         var current: [Run] = []
+        var currentKey: TimeInterval = -1
+        let bucketSeconds: TimeInterval = 2
+
         for run in runs {
-            if let first = current.first, first.batchId == run.batchId {
+            let key = floor(run.createdAt.timeIntervalSince1970 / bucketSeconds)
+            if !current.isEmpty, key == currentKey {
                 current.append(run)
             } else {
                 if let first = current.first {
-                    result.append(RunBatch(id: first.batchId, createdAt: first.createdAt, runs: current))
+                    result.append(RunBatch(id: first.id, createdAt: first.createdAt, runs: current))
                 }
                 current = [run]
+                currentKey = key
             }
         }
         if let first = current.first {
-            result.append(RunBatch(id: first.batchId, createdAt: first.createdAt, runs: current))
+            result.append(RunBatch(id: first.id, createdAt: first.createdAt, runs: current))
         }
         return result
     }
@@ -1185,22 +1095,20 @@ struct ContentView: View {
     }
 
     /// Fans out `parallelRuns` real synthesizes per Generate tap. Each row
-    /// appears shimmering, then resolves via the live chat→generate→poll→fetch
-    /// pipeline. Per-row Tasks are tracked so removeRun can cancel them.
+    /// appears shimmering, then resolves via the live chat→generate pipeline.
+    /// Per-row Tasks are tracked so removeRun can cancel them.
     private func generate() {
         guard !chips.isEmpty else { return }
         dismissAll()
         tap()
         let snapshot = chips.map { Chip(text: $0.text) }
         let idea = snapshot.map(\.text).joined(separator: ", ")
-        let batchId = UUID()
         let createdAt = Date()
         let new = (0..<parallelRuns).map { _ in
             Run(
                 chips: snapshot.map { Chip(text: $0.text) },
                 state: .loading,
                 paletteIndex: Int.random(in: 0..<Self.gradientPalettes.count),
-                batchId: batchId,
                 createdAt: createdAt
             )
         }
@@ -1208,7 +1116,6 @@ struct ContentView: View {
             runs.insert(contentsOf: new, at: 0)
             trimHistory()
         }
-        Store.saveRuns(runs)
         for run in new {
             resolveReal(runId: run.id, idea: idea)
         }
@@ -1224,9 +1131,10 @@ struct ContentView: View {
         resolveReal(runId: run.id, idea: idea)
     }
 
-    /// Live API resolution for a single row. Stores the image bytes to disk
-    /// on success and updates `runs` in place. Cancellation (via removeRun)
-    /// propagates through Task.checkCancellation so we don't burn API calls.
+    /// Live API resolution for a single row. Persists bytes via ProjectService
+    /// (chips → IPTC keywords, joined prompt → caption, "Flux2Pro" → software)
+    /// and updates `runs` in place. Cancellation (via removeRun) propagates
+    /// through Task.checkCancellation so we don't burn API calls.
     private func resolveReal(runId: Run.ID, idea: String) {
         let task = Task { @MainActor in
             defer { inflight.removeValue(forKey: runId) }
@@ -1235,13 +1143,18 @@ struct ContentView: View {
                 try Task.checkCancellation()
                 guard let idx = runs.firstIndex(where: { $0.id == runId }) else { return }
                 guard let img = UIImage(data: data) else { throw ImageServiceError.decodingFailed }
-                let filename = Store.writeImage(data, runId: runId)
+                let filename = Store.saveRun(data: data, runId: runId, chips: runs[idx].chips)
+                // If the user toggled the heart while we were generating,
+                // the in-memory `liked` flag is already true but the file
+                // wasn't created yet — flush it now.
+                if runs[idx].liked {
+                    Store.setLiked(filename: filename, liked: true)
+                }
                 withAnimation(.easeOut(duration: 0.25)) {
                     runs[idx].state = .loaded
                     runs[idx].imageFilename = filename
                     runs[idx].image = img
                 }
-                Store.saveRuns(runs)
                 UIImpactFeedbackGenerator(style: .soft).impactOccurred()
             } catch is CancellationError {
                 // Row was removed before generation finished — nothing to do.
@@ -1250,7 +1163,6 @@ struct ContentView: View {
                 withAnimation(.easeOut(duration: 0.25)) {
                     runs[idx].state = .failed
                 }
-                Store.saveRuns(runs)
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
             }
         }
@@ -1278,7 +1190,6 @@ struct ContentView: View {
             runs.remove(at: idx)
             pendingUndos.append(undo)
         }
-        Store.saveRuns(runs)
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             // If the user didn't undo, delete the disk bytes for real and
@@ -1301,7 +1212,6 @@ struct ContentView: View {
             runs.insert(undo.run, at: insertAt)
             pendingUndos.removeAll { $0.id == undo.id }
         }
-        Store.saveRuns(runs)
     }
 
     private func toggleLike(_ run: Run) {
@@ -1310,7 +1220,11 @@ struct ContentView: View {
         withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
             runs[idx].liked.toggle()
         }
-        Store.saveRuns(runs)
+        // Flush to the embedded IPTC rating, but only once the file exists.
+        // For still-loading rows, resolveReal mirrors the like at save time.
+        if runs[idx].state == .loaded, !runs[idx].imageFilename.isEmpty {
+            Store.setLiked(filename: runs[idx].imageFilename, liked: runs[idx].liked)
+        }
     }
 
     /// Trims to `maxRuns`, evicting unliked rows from the tail first so the
