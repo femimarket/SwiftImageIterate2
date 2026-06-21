@@ -279,7 +279,7 @@ final class ImageService: @unchecked Sendable {
 
 // MARK: - ContentView
 
-struct ContentView: View {
+public struct ContentView: View {
     @State private var chips: [Chip]
     @State private var runs: [Run]
     @State private var editingId: Chip.ID?
@@ -299,7 +299,7 @@ struct ContentView: View {
         case add
     }
 
-    init(bearer: String) {
+    public init(bearer: String) {
         ImageService.configure(bearer: bearer)
         _chips = State(initialValue: Store.loadChips())
         _runs = State(initialValue: Store.loadRuns())
@@ -321,7 +321,7 @@ struct ContentView: View {
         feedback.impactOccurred()
     }
 
-    var body: some View {
+    public var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             RadialGradient(

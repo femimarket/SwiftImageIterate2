@@ -34,6 +34,7 @@ let package = Package(
             exclude: [
                 "ImageIterate2App.swift",
                 "doc.md",
+                "v1.md",
                 "Assets.xcassets",
             ],
             resources: [
