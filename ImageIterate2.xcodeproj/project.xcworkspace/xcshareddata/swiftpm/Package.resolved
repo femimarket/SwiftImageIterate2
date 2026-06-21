@@ -1,5 +1,5 @@
 {
-  "originHash" : "a882c89a6b6928a0b00c79dc9ff94f5f7dd9ece6c2ee0324c318a9d1e34f2a32",
+  "originHash" : "71d99a5df075543b7dd3258997febd3f7ee81de4c7a78ca51223a4b9769fd7cf",
   "pins" : [
     {
       "identity" : "swift-project-service",
@@ -7,7 +7,7 @@
       "location" : "https://github.com/femimarket/swift-project-service",
       "state" : {
         "branch" : "main",
-        "revision" : "3a159ae8f5762befc14aecd9f5a4cfff8dc37ad5"
+        "revision" : "b98a8c1ed846639127e6d8fd7c8c21eb52d7d2ed"
       }
     },
     {
@@ -16,7 +16,7 @@
       "location" : "https://github.com/femimarket/swiftapi",
       "state" : {
         "branch" : "main",
-        "revision" : "1544d31a0478db686d982c7abd2b6e2b7d73cf22"
+        "revision" : "631553fc8a137c04cb11bbbaa15623c8f5e9c009"
       }
     }
   ],
