@@ -196,20 +196,9 @@ final class ImageService: @unchecked Sendable {
         ApiAPIConfiguration.shared.customHeaders["Authorization"] = "Bearer \(bearer)"
     }
 
-    /// Default mode: chat-synthesize the user's chips into a Flux2-friendly
-    /// prompt, then call Flux2Pro. The chat step is intentional — it reframes
-    /// terse chip lists for the text-to-image model. Skipped in cast mode
-    /// because Klein already has the visual references and the user's chips
-    /// are the casting directive directly.
-    func synthesizeAndGenerate(idea: String) async throws -> (data: Data, serverFilename: String) {
-        let synthesized = try await chatSynthesize(idea: idea)
-        try Task.checkCancellation()
-        return try await generate(prompt: synthesized)
-    }
-
     /// Cast mode: load both reference files from disk, base64-encode raw
-    /// (iOS path per schema), and call Klein once with the chip-joined prompt.
-    /// No chat synthesis — Klein takes the user's directive verbatim.
+    /// (iOS path per schema), and call Klein once. Caller is responsible for
+    /// pre-synthesizing the prompt — every text path runs through synth.
     func castGenerate(
         prompt: String,
         characterFilename: String,
@@ -240,8 +229,9 @@ final class ImageService: @unchecked Sendable {
 
     /// Sends the user's idea to chat and returns one synthesized image prompt.
     /// Per-slot natural variation comes from the LLM's own temperature when N
-    /// of these run in parallel against the same input.
-    private func chatSynthesize(idea: String) async throws -> String {
+    /// of these run in parallel against the same input. Runs on every Generate
+    /// regardless of mode — Engineer treats chat synthesis as universal.
+    func chatSynthesize(idea: String) async throws -> String {
         let userIdea = idea.isEmpty ? "Surprise me — generate something interesting." : idea
         let synthesizerRequest = """
             Make image prompt frame for Flux2. Reply with only the prompt, nothing else.
@@ -262,8 +252,9 @@ final class ImageService: @unchecked Sendable {
 
     /// Single call → base64-decode. The result `file` is image bytes encoded
     /// inline as base64 (optionally with a `data:image/...;base64,` prefix),
-    /// so the request returns the finished image in one round-trip.
-    private func generate(prompt: String) async throws -> (Data, String) {
+    /// so the request returns the finished image in one round-trip. Caller
+    /// supplies a pre-synthesized prompt.
+    func generate(prompt: String) async throws -> (Data, String) {
         let id = UUID()
         let result = try await call(.typeFlux2Pro(Flux2Pro(
             falRequestId: "", file: "", prompt: prompt, type: .flux2Pro
@@ -1166,26 +1157,28 @@ public struct ContentView: View {
         resolveReal(runId: run.id, idea: idea)
     }
 
-    /// Live API resolution for a single row. Dispatches by `CharacterCast`
-    /// state: cast mode → Klein with two image references and chips verbatim;
-    /// default mode → Flux2Pro via chat-synthesizer. Persists bytes via
+    /// Live API resolution for a single row. Every Generate goes through
+    /// chat synthesis first; only the downstream call (Klein vs Flux2Pro)
+    /// depends on whether `CharacterCast` is set. Persists bytes via
     /// ProjectService with an honest model name. Cancellation (via removeRun)
     /// propagates through Task.checkCancellation so we don't burn API calls.
     private func resolveReal(runId: Run.ID, idea: String) {
         let task = Task { @MainActor in
             defer { inflight.removeValue(forKey: runId) }
             do {
+                let synthesized = try await ImageService.shared.chatSynthesize(idea: idea)
+                try Task.checkCancellation()
                 let data: Data
                 let modelName: String
                 if let (character, target) = ProjectService.getCharacterCast() {
                     (data, _) = try await ImageService.shared.castGenerate(
-                        prompt: idea,
+                        prompt: synthesized,
                         characterFilename: character,
                         targetFilename: target
                     )
                     modelName = "Flux2KleinI2I"
                 } else {
-                    (data, _) = try await ImageService.shared.synthesizeAndGenerate(idea: idea)
+                    (data, _) = try await ImageService.shared.generate(prompt: synthesized)
                     modelName = "Flux2Pro"
                 }
                 try Task.checkCancellation()
